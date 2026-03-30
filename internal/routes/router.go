@@ -4,24 +4,260 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/handlers"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/middleware"
 )
 
-func Register(r *gin.Engine, db *pgxpool.Pool, secretKey string) {
+func Register(r *gin.Engine, db *pgxpool.Pool, secretKey string, cfg *config.Config) {
 	authHandler := &handlers.AuthHandler{
 		DB:        db,
 		SecretKey: secretKey,
 	}
+	vendorHandler := &handlers.VendorHandler{DB: db}
+	permissionHandler := &handlers.PermissionHandler{DB: db}
+	assetHandler := &handlers.AssetHandler{DB: db}
+	userHandler := &handlers.UserHandler{DB: db}
+	plaidHandler := &handlers.PlaidHandler{DB: db, Cfg: cfg}
+	paymentMethodHandler := &handlers.PaymentMethodHandler{DB: db}
+	cardHandler := &handlers.CardHandler{DB: db}
+	twoFAHandler := &handlers.TwoFactorAuthHandler{DB: db, SecretKey: secretKey}
+	reportHandler := &handlers.ReportHandler{DB: db}
+	locationHandler := &handlers.LocationHandler{DB: db}
+	accountingHandler := &handlers.AccountingHandler{DB: db}
+	payrollHandler := &handlers.PayrollHandler{DB: db}
+	reconciliationHandler := &handlers.ReconciliationHandler{DB: db}
+	transactionHandler := &handlers.TransactionHandler{DB: db}
+	paybillHandler := &handlers.PayBillHandler{DB: db}
+	tekmetricHandler := &handlers.TekmetricHandler{DB: db, Cfg: cfg}
+	dashboardHandler := &handlers.DashboardHandler{DB: db}
 
 	// Public routes
 	r.GET("/health", handlers.Health)
 	r.POST("/auth/signin", authHandler.SignIn)
+	r.POST("/auth/signup", authHandler.Signup)
+	r.POST("/auth/login", authHandler.Login)
+	r.POST("/auth/login-direct", authHandler.LoginDirect)
+	r.POST("/auth/forgot-password", authHandler.ForgotPassword)
+	r.POST("/auth/reset-password", authHandler.ResetPassword)
+
+	// 2FA routes (public — used during login flow before token is issued)
+	twoFA := r.Group("/2fa")
+	{
+		twoFA.POST("/mobile-otp", twoFAHandler.SendMobileOTP)
+		twoFA.POST("/email-verification", twoFAHandler.SendEmailVerification)
+		twoFA.POST("/authenticator-setup", twoFAHandler.SetupAuthenticator)
+		twoFA.POST("/verify-otp", twoFAHandler.VerifyOTP)
+		twoFA.POST("/resend-otp", twoFAHandler.ResendOTP)
+	}
 
 	// Protected routes
 	protected := r.Group("/")
 	protected.Use(middleware.Auth(secretKey))
 	{
-		protected.GET("/dashboard/bank-balance", handlers.BankBalance)
+		// Dashboard
+		dashboard := protected.Group("/dashboard")
+		{
+			dashboard.GET("/bank-balance", dashboardHandler.GetBankBalance)
+			dashboard.GET("/payment-method", dashboardHandler.GetPaymentMethod)
+			dashboard.GET("/credit-card-Balance-list", dashboardHandler.GetCreditCardBalanceList)
+			dashboard.GET("/api/bank-balance-trans", dashboardHandler.GetBankBalanceTrans)
+			dashboard.GET("/api/bank-balance-trends", dashboardHandler.GetBankBalanceTrends)
+			dashboard.GET("/bank-ledger", dashboardHandler.GetBankLedger)
+			dashboard.GET("/vendor/:vendor_id/ledger", dashboardHandler.GetVendorLedger)
+			dashboard.GET("/credit-card-balances-monthly", dashboardHandler.GetCreditCardBalancesMonthly)
+			dashboard.GET("/credit-card-balances-weekly", dashboardHandler.GetCreditCardBalancesWeekly)
+			dashboard.GET("/credit", dashboardHandler.GetCredit)
+			dashboard.GET("/api/credit_cards_due_soon", dashboardHandler.GetCreditCardsDueSoon)
+			dashboard.GET("/low-balance-account", dashboardHandler.GetLowBalanceAccount)
+			dashboard.GET("/overdue-payables", dashboardHandler.GetOverduePayables)
+			dashboard.GET("/accounts-payable", dashboardHandler.GetAccountsPayable)
+			dashboard.GET("/items-need-attention", dashboardHandler.GetItemsNeedAttention)
+			dashboard.GET("/accounts-payable-by-vendor", dashboardHandler.GetAccountsPayableByVendor)
+			dashboard.GET("/account-receivable/dashboard", dashboardHandler.GetAccountReceivableDashboard)
+			dashboard.GET("/account-receivable/summary", dashboardHandler.GetAccountReceivableSummary)
+			dashboard.GET("/account-receivable/shop/:shop_id", dashboardHandler.GetAccountReceivableByShop)
+			dashboard.GET("/account-receivable/aging_receivables", dashboardHandler.GetAgingReceivables)
+			dashboard.GET("/account-receivable/graph", dashboardHandler.GetAccountReceivableGraph)
+		}
+
+		// Vendors
+		vendors := protected.Group("/vendors")
+		{
+			vendors.POST("/", vendorHandler.CreateVendor)
+			vendors.GET("/", vendorHandler.ListVendors)
+			vendors.GET("/:vendor_id", vendorHandler.GetVendor)
+			vendors.PATCH("/:vendor_id", vendorHandler.PatchVendor)
+			vendors.DELETE("/:vendor_id", vendorHandler.DeleteVendor)
+		}
+
+		// Permissions & Roles
+		perms := protected.Group("/api/permissions")
+		{
+			perms.POST("/", permissionHandler.CreatePermission)
+			perms.GET("/", permissionHandler.GetAllPermissions)
+			perms.POST("/roles", permissionHandler.CreateRole)
+			perms.GET("/roles", permissionHandler.GetAllRoles)
+			perms.GET("/roles/:role_id", permissionHandler.GetRole)
+			perms.PUT("/roles/:role_id/permissions", permissionHandler.AssignPermissions)
+		}
+
+		// Assets
+		assets := protected.Group("/assets")
+		{
+			assets.POST("/", assetHandler.CreateAsset)
+			assets.GET("/", assetHandler.GetAllAssets)
+			assets.GET("/:asset_id", assetHandler.GetAsset)
+			assets.PATCH("/:asset_id", assetHandler.UpdateAsset)
+			assets.DELETE("/:asset_id", assetHandler.DeleteAsset)
+		}
+
+		// Users
+		users := protected.Group("/users")
+		{
+			users.GET("/me", userHandler.GetMyProfile)
+			users.PATCH("/me", userHandler.EditMyProfile)
+			users.GET("/", userHandler.ListUsers)
+			users.POST("/", userHandler.CreateUser)
+			users.GET("/:user_id", userHandler.GetUser)
+			users.PATCH("/:user_id", userHandler.PatchUser)
+			users.DELETE("/:user_id", userHandler.DeleteUser)
+		}
+
+		// Plaid
+		plaid := protected.Group("/plaid")
+		{
+			plaid.POST("/exchange_public_token", plaidHandler.ExchangePublicToken)
+			plaid.POST("/fetch_transactions", plaidHandler.FetchTransactions)
+			plaid.GET("/sync_transactions", plaidHandler.SyncTransactions)
+			plaid.POST("/link-token", plaidHandler.CreateLinkToken)
+			plaid.POST("/sandbox/connect-bank", plaidHandler.SandboxConnectBank)
+		}
+
+		// Payment Methods
+		pm := protected.Group("/payment-methods")
+		{
+			pm.POST("/", paymentMethodHandler.CreatePaymentMethod)
+			pm.GET("/", paymentMethodHandler.ListPaymentMethods)
+			pm.GET("/:payment_method_id", paymentMethodHandler.GetPaymentMethod)
+			pm.PATCH("/:payment_method_id", paymentMethodHandler.UpdatePaymentMethod)
+			pm.DELETE("/:payment_method_id", paymentMethodHandler.DeletePaymentMethod)
+		}
+
+		// Cards
+		cards := protected.Group("/cards")
+		{
+			cards.GET("/custom-cycle", cardHandler.GetCustomCycleCards)
+			cards.POST("/", cardHandler.CreateCard)
+			cards.GET("/", cardHandler.GetAllCards)
+			cards.GET("/:card_id", cardHandler.GetCard)
+			cards.PATCH("/:card_id", cardHandler.UpdateCard)
+			cards.DELETE("/:card_id", cardHandler.DeleteCard)
+		}
+
+		// Reports
+		reports := protected.Group("/reports")
+		{
+			reports.GET("/profit-loss", reportHandler.ProfitLossReport)
+			reports.GET("/credit-card-summary", reportHandler.CreditCardSummary)
+		}
+
+		// Accounting (Chart of Accounts)
+		accounting := protected.Group("/accounting")
+		{
+			accounting.POST("/", accountingHandler.CreateAccount)
+			accounting.GET("/", accountingHandler.ListAccounts)
+			accounting.POST("/import-accounts/", accountingHandler.ImportAccounts)
+			accounting.GET("/:account_id", accountingHandler.GetAccount)
+			accounting.PATCH("/:account_id", accountingHandler.UpdateAccount)
+			accounting.DELETE("/:account_id", accountingHandler.DeleteAccount)
+		}
+
+		// Payroll
+		payroll := protected.Group("/payroll")
+		{
+			payroll.POST("/", payrollHandler.CreatePayroll)
+			payroll.GET("/", payrollHandler.GetAllPayrolls)
+			payroll.POST("/adjustments", payrollHandler.CreateAdjustment)
+			payroll.GET("/adjustments", payrollHandler.ListAdjustments)
+			payroll.GET("/adjustments/:adjustment_id", payrollHandler.GetAdjustment)
+			payroll.PATCH("/adjustments/:adjustment_id", payrollHandler.UpdateAdjustment)
+			payroll.DELETE("/adjustments/:adjustment_id", payrollHandler.DeleteAdjustment)
+			payroll.GET("/:payroll_id", payrollHandler.GetPayroll)
+			payroll.PATCH("/:payroll_id", payrollHandler.UpdatePayroll)
+			payroll.DELETE("/:payroll_id", payrollHandler.DeletePayroll)
+		}
+
+		// Reconciliation
+		reconciliation := protected.Group("/api/reconciliation")
+		{
+			reconciliation.GET("/daily-match", reconciliationHandler.DailyMatch)
+			reconciliation.GET("/deposit-detail", reconciliationHandler.DepositDetail)
+		}
+
+		// Transactions
+		transactions := protected.Group("/transactions")
+		{
+			transactions.POST("/", transactionHandler.CreateTransaction)
+			transactions.GET("/", transactionHandler.ListTransactions)
+			transactions.POST("/import-data", transactionHandler.ImportData)
+			transactions.POST("/reverse-change", transactionHandler.ReverseChange)
+			transactions.PUT("/liability-minimum-balance/:liability_id", transactionHandler.UpdateLiabilityMinimumBalance)
+			transactions.GET("/changes/:transaction_id", transactionHandler.ListTransactionChanges)
+			transactions.GET("/:transaction_id", transactionHandler.GetTransaction)
+			transactions.PATCH("/:transaction_id", transactionHandler.UpdateTransaction)
+			transactions.DELETE("/:transaction_id", transactionHandler.DeleteTransaction)
+			transactions.POST("/:transaction_id/upload-document", transactionHandler.UploadDocument)
+		}
+
+		// PayBills
+		paybills := protected.Group("/paybills")
+		{
+			paybills.POST("/", paybillHandler.CreatePayBill)
+			paybills.GET("/", paybillHandler.ListPayBills)
+			paybills.POST("/schedule-payment/", paybillHandler.CreateSchedulePayment)
+			paybills.GET("/schedule-payment/", paybillHandler.ListSchedulePayments)
+			paybills.GET("/schedule-payment/:schedule_payment_id", paybillHandler.GetSchedulePayment)
+			paybills.PATCH("/schedule-payment/:schedule_payment_id", paybillHandler.UpdateSchedulePayment)
+			paybills.DELETE("/schedule-payment/:schedule_payment_id", paybillHandler.DeleteSchedulePayment)
+			paybills.GET("/reminders/", paybillHandler.ListReminders)
+			paybills.PATCH("/reminders/:reminder_id/acknowledge", paybillHandler.AcknowledgeReminder)
+			paybills.POST("/manual-bills/", paybillHandler.CreateManualBill)
+			paybills.GET("/manual-bills/", paybillHandler.ListManualBills)
+			paybills.GET("/manual-bills/:bill_id", paybillHandler.GetManualBill)
+			paybills.PATCH("/manual-bills/:bill_id", paybillHandler.UpdateManualBill)
+			paybills.DELETE("/manual-bills/:bill_id", paybillHandler.DeleteManualBill)
+			paybills.GET("/:paybill_id", paybillHandler.GetPayBill)
+			paybills.PATCH("/:paybill_id", paybillHandler.UpdatePayBill)
+			paybills.DELETE("/:paybill_id", paybillHandler.DeletePayBill)
+		}
+
+		// Tekmetric
+		tekmetric := protected.Group("/tekmetric")
+		{
+			tekmetric.GET("/shops", tekmetricHandler.GetShops)
+			tekmetric.GET("/repair-orders", tekmetricHandler.GetRepairOrders)
+			tekmetric.PATCH("/repair-orders/bulk/", tekmetricHandler.BulkPatchRepairOrders)
+			tekmetric.GET("/repair-orders/:repair_order_id", tekmetricHandler.GetRepairOrderByID)
+			tekmetric.PATCH("/repair-orders/:repair_order_id", tekmetricHandler.PatchRepairOrder)
+			tekmetric.GET("/custo", tekmetricHandler.GetAllCustomersParallel)
+			tekmetric.GET("/jobs", tekmetricHandler.GetJobs)
+			tekmetric.GET("/jobs/:job_id", tekmetricHandler.GetJobByID)
+		}
+
+		// Locations
+		locations := protected.Group("/locations")
+		{
+			locations.POST("/", locationHandler.CreateLocation)
+			locations.GET("/", locationHandler.GetAllLocations)
+			locations.POST("/shop-info/", locationHandler.CreateShopInfo)
+			locations.GET("/shop-info/", locationHandler.GetAllShopInfos)
+			locations.GET("/shop-info/:shop_info_id", locationHandler.GetShopInfo)
+			locations.PATCH("/shop-info/:shop_info_id", locationHandler.UpdateShopInfo)
+			locations.DELETE("/shop-info/:shop_info_id", locationHandler.DeleteShopInfo)
+			locations.GET("/:location_id", locationHandler.GetLocation)
+			locations.PATCH("/:location_id", locationHandler.UpdateLocation)
+			locations.DELETE("/:location_id", locationHandler.DeleteLocation)
+		}
 	}
 }

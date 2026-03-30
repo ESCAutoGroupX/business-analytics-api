@@ -23,7 +23,7 @@ func main() {
 	r := gin.Default()
 	r.Use(middleware.CORS())
 
-	routes.Register(r, db, cfg.SecretKey)
+	routes.Register(r, db, cfg.SecretKey, cfg)
 
 	log.Printf("Server starting on port %s", cfg.Port)
 	if err := r.Run(":" + cfg.Port); err != nil {
