@@ -89,7 +89,7 @@ func (h *VendorHandler) CreateVendor(c *gin.Context) {
 func (h *VendorHandler) ListVendors(c *gin.Context) {
 	rows, err := h.DB.Query(context.Background(),
 		`SELECT v.id, v.name, v.category, v.vendor_type, v.shop_name, v.is_parts_vendor, v.is_cogs_vendor, v.is_statement_vendor, v.gl_code_id, v.created_at, v.updated_at,
-		        g.id, g.account_name, g.account_type, g.account_sub_type, g.detail_type, g.balance, g.description
+		        g.id, g.name, g.account_type, g.description
 		 FROM vendors v
 		 LEFT JOIN chart_of_accounts g ON v.gl_code_id = g.id`)
 	if err != nil {
@@ -102,21 +102,19 @@ func (h *VendorHandler) ListVendors(c *gin.Context) {
 	vendors := []vendorResponse{}
 	for rows.Next() {
 		var v vendorResponse
-		var glCodeID, gID, gName, gType, gSubType, gDetailType, gDesc *string
-		var gBalance *float64
+		var glCodeID, gID, gName, gType, gDesc *string
 		if err := rows.Scan(&v.ID, &v.Name, &v.Category, &v.VendorType, &v.ShopName,
 			&v.IsPartsVendor, &v.IsCogsVendor, &v.IsStatementVendor, &glCodeID,
 			&v.CreatedAt, &v.UpdatedAt,
-			&gID, &gName, &gType, &gSubType, &gDetailType, &gBalance, &gDesc); err != nil {
+			&gID, &gName, &gType, &gDesc); err != nil {
 			log.Printf("ERROR: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan vendor", "error": err.Error()})
 			return
 		}
 		if gID != nil {
 			v.GLCode = gin.H{
-				"id": *gID, "account_name": gName, "account_type": gType,
-				"account_sub_type": gSubType, "detail_type": gDetailType,
-				"balance": gBalance, "description": gDesc,
+				"id": *gID, "name": gName, "account_type": gType,
+				"description": gDesc,
 			}
 		}
 		vendors = append(vendors, v)
@@ -228,19 +226,18 @@ func (h *VendorHandler) DeleteVendor(c *gin.Context) {
 
 func (h *VendorHandler) getVendorByID(c *gin.Context, id string) {
 	var v vendorResponse
-	var glCodeID, gID, gName, gType, gSubType, gDetailType, gDesc *string
-	var gBalance *float64
+	var glCodeID, gID, gName, gType, gDesc *string
 
 	err := h.DB.QueryRow(context.Background(),
 		`SELECT v.id, v.name, v.category, v.vendor_type, v.shop_name, v.is_parts_vendor, v.is_cogs_vendor, v.is_statement_vendor, v.gl_code_id, v.created_at, v.updated_at,
-		        g.id, g.account_name, g.account_type, g.account_sub_type, g.detail_type, g.balance, g.description
+		        g.id, g.name, g.account_type, g.description
 		 FROM vendors v
 		 LEFT JOIN chart_of_accounts g ON v.gl_code_id = g.id
 		 WHERE v.id = $1`, id,
 	).Scan(&v.ID, &v.Name, &v.Category, &v.VendorType, &v.ShopName,
 		&v.IsPartsVendor, &v.IsCogsVendor, &v.IsStatementVendor, &glCodeID,
 		&v.CreatedAt, &v.UpdatedAt,
-		&gID, &gName, &gType, &gSubType, &gDetailType, &gBalance, &gDesc)
+		&gID, &gName, &gType, &gDesc)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Vendor not found"})
 		return
@@ -248,9 +245,8 @@ func (h *VendorHandler) getVendorByID(c *gin.Context, id string) {
 
 	if gID != nil {
 		v.GLCode = gin.H{
-			"id": *gID, "account_name": gName, "account_type": gType,
-			"account_sub_type": gSubType, "detail_type": gDetailType,
-			"balance": gBalance, "description": gDesc,
+			"id": *gID, "name": gName, "account_type": gType,
+			"description": gDesc,
 		}
 	}
 
