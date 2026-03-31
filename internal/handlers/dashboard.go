@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -48,7 +49,8 @@ func (h *DashboardHandler) GetBankBalance(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -106,7 +108,8 @@ func (h *DashboardHandler) GetPaymentMethod(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'CREDIT_CARD'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -208,7 +211,8 @@ func (h *DashboardHandler) GetCreditCardBalanceList(c *gin.Context) {
 		fmt.Sprintf(`SELECT id, COALESCE(title, ''), COALESCE(starting_credit_card_bal, 0)
 		 FROM payment_methods %s ORDER BY sorting_order, created_at`, pmWhere), pmArgs...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer pmRows.Close()
@@ -304,7 +308,8 @@ func (h *DashboardHandler) GetCreditCardBalanceList(c *gin.Context) {
 
 	txRows, err := h.DB.Query(ctx, dataQ, txArgs...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions", "error": err.Error()})
 		return
 	}
 	defer txRows.Close()
@@ -349,7 +354,8 @@ func (h *DashboardHandler) GetBankBalanceTrans(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -433,7 +439,8 @@ func (h *DashboardHandler) GetBankBalanceTrends(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -542,7 +549,8 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer pmRows.Close()
@@ -621,7 +629,8 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 		        COALESCE(account_name, ''), COALESCE(account_id, '')
 		 FROM transactions %s ORDER BY date, created_at`, where), args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions", "error": err.Error()})
 		return
 	}
 	defer allTxRows.Close()
@@ -661,7 +670,8 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 		sortedArgs := append(args, offset, pageSize)
 		sortedRows, err := h.DB.Query(ctx, sortedQ, sortedArgs...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query sorted transactions"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query sorted transactions", "error": err.Error()})
 			return
 		}
 		defer sortedRows.Close()
@@ -774,7 +784,8 @@ func (h *DashboardHandler) GetVendorLedger(c *gin.Context) {
 		        COALESCE(category, ''), COALESCE(reference, ''), COALESCE(invoice_url, '')
 		 FROM pay_bills %s ORDER BY date DESC`, where), args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "data": gin.H{"detail": "failed to query invoices"}})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "data": gin.H{"detail": "failed to query invoices"}, "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -817,7 +828,8 @@ func (h *DashboardHandler) GetCreditCardBalancesMonthly(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -920,7 +932,8 @@ func (h *DashboardHandler) GetCreditCardBalancesWeekly(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -1030,7 +1043,8 @@ func (h *DashboardHandler) GetCredit(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'CREDIT_CARD'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -1151,7 +1165,8 @@ func (h *DashboardHandler) GetCreditCardsDueSoon(c *gin.Context) {
 		   AND next_payment_due_date <= $1
 		 ORDER BY next_payment_due_date`, thirtyDaysLater)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query credit cards"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query credit cards", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -1193,7 +1208,8 @@ func (h *DashboardHandler) GetLowBalanceAccount(c *gin.Context) {
 		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -1295,7 +1311,8 @@ func (h *DashboardHandler) GetOverduePayables(c *gin.Context) {
 		 GROUP BY v.id, v.name
 		 ORDER BY total DESC`, today)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query overdue payables"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query overdue payables", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -1336,7 +1353,8 @@ func (h *DashboardHandler) GetAccountsPayable(c *gin.Context) {
 		 GROUP BY v.id, v.name
 		 ORDER BY SUM(pb.amount) DESC`, today)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query overdue payables"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query overdue payables", "error": err.Error()})
 		return
 	}
 	defer overdueRows.Close()
@@ -1366,7 +1384,8 @@ func (h *DashboardHandler) GetAccountsPayable(c *gin.Context) {
 		 GROUP BY v.id, v.name
 		 ORDER BY SUM(pb.amount) DESC`, today)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query current payables"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query current payables", "error": err.Error()})
 		return
 	}
 	defer currentRows.Close()
@@ -1525,7 +1544,8 @@ func (h *DashboardHandler) GetAccountsPayableByVendor(c *gin.Context) {
 		 GROUP BY v.id, v.name, pb.date
 		 ORDER BY v.name, pb.date`, startDate.Format("2006-01-02"))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query accounts payable"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query accounts payable", "error": err.Error()})
 		return
 	}
 	defer rows.Close()

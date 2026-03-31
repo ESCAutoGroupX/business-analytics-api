@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -205,7 +206,8 @@ func (h *PayBillHandler) CreatePayBill(c *gin.Context) {
 		uid, now, now,
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create paybill"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create paybill", "error": err.Error()})
 		return
 	}
 
@@ -244,7 +246,8 @@ func (h *PayBillHandler) ListPayBills(c *gin.Context) {
 
 	rows, err := h.DB.Query(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query paybills"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query paybills", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -431,7 +434,8 @@ func (h *PayBillHandler) CreateSchedulePayment(c *gin.Context) {
 		req.PaybillID, req.RepeatEvery, req.Frequency, req.StartDate, req.EndDate, req.Enabled, now, now,
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create schedule payment"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create schedule payment", "error": err.Error()})
 		return
 	}
 
@@ -453,7 +457,8 @@ func (h *PayBillHandler) ListSchedulePayments(c *gin.Context) {
 		 WHERE pb.user_id = $1
 		 OFFSET $2 LIMIT $3`, uid, skip, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query schedule payments"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query schedule payments", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -598,7 +603,8 @@ func (h *PayBillHandler) ListReminders(c *gin.Context) {
 		`SELECT id, scheduled_payment_id, reminder_type, message, reminder_date, acknowledged, created_at, updated_at
 		 FROM reminders WHERE acknowledged = false ORDER BY reminder_date`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query reminders"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query reminders", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -700,7 +706,8 @@ func (h *PayBillHandler) ListManualBills(c *gin.Context) {
 		 FROM manual_bill_entries WHERE user_id = $1 ORDER BY created_at DESC OFFSET $2 LIMIT $3`,
 		uid, skip, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Database error: %v", err)})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Database error: %v", err), "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -717,7 +724,8 @@ func (h *PayBillHandler) ListManualBills(c *gin.Context) {
 	allRows, err := h.DB.Query(context.Background(),
 		`SELECT amount, due_date, status, updated_at FROM manual_bill_entries WHERE user_id = $1`, uid)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Database error: %v", err)})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Database error: %v", err), "error": err.Error()})
 		return
 	}
 	defer allRows.Close()

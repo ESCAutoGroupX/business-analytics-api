@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -118,7 +119,8 @@ func (h *PlaidHandler) ExchangePublicToken(c *gin.Context) {
 	_, err = h.DB.Exec(context.Background(),
 		"UPDATE users SET plaid_access_token = $1 WHERE id = $2", accessToken, req.UserID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to store access token"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to store access token", "error": err.Error()})
 		return
 	}
 

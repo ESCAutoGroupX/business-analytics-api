@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 
@@ -58,7 +59,8 @@ func (h *ReportHandler) ProfitLossReport(c *gin.Context) {
 
 	rows, err := h.DB.Query(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Internal server error: %s", err.Error())})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Internal server error: %s", err.Error()), "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -190,7 +192,8 @@ func (h *ReportHandler) CreditCardSummary(c *gin.Context) {
 
 	rows, err := h.DB.Query(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Internal server error: %s", err.Error())})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Internal server error: %s", err.Error()), "error": err.Error()})
 		return
 	}
 	defer rows.Close()

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -82,7 +83,8 @@ func (h *TransactionHandler) CreateTransaction(c *gin.Context) {
 
 	_, err := h.DB.Exec(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("failed to create transaction: %v", err)})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("failed to create transaction: %v", err), "error": err.Error()})
 		return
 	}
 
@@ -215,7 +217,8 @@ func (h *TransactionHandler) ListTransactions(c *gin.Context) {
 
 	rows, err := h.DB.Query(context.Background(), dataQuery, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -349,7 +352,8 @@ func (h *TransactionHandler) UpdateTransaction(c *gin.Context) {
 
 	_, err = h.DB.Exec(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update transaction"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update transaction", "error": err.Error()})
 		return
 	}
 
@@ -507,7 +511,8 @@ func (h *TransactionHandler) UploadDocument(c *gin.Context) {
 	filePath := filepath.Join(fileDir, file.Filename)
 
 	if err := c.SaveUploadedFile(file, filePath); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to save file"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to save file", "error": err.Error()})
 		return
 	}
 
@@ -540,7 +545,8 @@ func (h *TransactionHandler) ListTransactionChanges(c *gin.Context) {
 		 JOIN users u ON cl.changed_by = u.id
 		 WHERE cl.transaction_id = $1`, txID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query change logs"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query change logs", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -658,7 +664,8 @@ func (h *TransactionHandler) UpdateLiabilityMinimumBalance(c *gin.Context) {
 		"UPDATE liabilities SET minimum_balance = $1, starting_credit_card_bal = $2 WHERE id = $3",
 		req.MinimumBalance, req.StartingCreditCardBal, liabilityID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update liability"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update liability", "error": err.Error()})
 		return
 	}
 

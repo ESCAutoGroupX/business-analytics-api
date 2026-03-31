@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"time"
@@ -169,7 +170,8 @@ func (h *TwoFactorAuthHandler) VerifyOTP(c *gin.Context) {
 
 	tokenString, err := token.SignedString([]byte(h.SecretKey))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate token"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate token", "error": err.Error()})
 		return
 	}
 

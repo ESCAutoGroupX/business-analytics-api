@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"log"
 	"math"
 	"net/http"
 	"time"
@@ -24,7 +25,8 @@ func (h *DashboardHandler) GetAccountReceivableDashboard(c *gin.Context) {
 		   AND TO_CHAR(ro.created_date, 'YYYY-MM') = $1
 		 ORDER BY ro.shop_id`, currentMonth)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query repair orders"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query repair orders", "error": err.Error()})
 		return
 	}
 	defer shopRows.Close()
@@ -164,7 +166,8 @@ func (h *DashboardHandler) GetAccountReceivableByShop(c *gin.Context) {
 		   AND TO_CHAR(ro.created_date, 'YYYY-MM') = $2
 		 ORDER BY ro.created_date DESC`, shopID, currentMonth)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query repair orders"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query repair orders", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -268,7 +271,8 @@ func (h *DashboardHandler) GetAgingReceivables(c *gin.Context) {
 		 ORDER BY ro.created_date ASC
 		 OFFSET $2 LIMIT $3`, fortyFiveDaysAgo, offset, size)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query aging receivables"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query aging receivables", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -338,7 +342,8 @@ func (h *DashboardHandler) GetAccountReceivableGraph(c *gin.Context) {
 		 WHERE ro.repair_order_status_code = 'WORKINPROGRESS'
 		 ORDER BY ro.shop_id`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query shops"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query shops", "error": err.Error()})
 		return
 	}
 	defer shopRows.Close()

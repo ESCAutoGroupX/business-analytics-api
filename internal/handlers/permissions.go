@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -59,7 +60,8 @@ func (h *PermissionHandler) CreatePermission(c *gin.Context) {
 	err := h.DB.QueryRow(context.Background(),
 		"SELECT EXISTS(SELECT 1 FROM permissions WHERE keyword = $1)", req.Keyword).Scan(&exists)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database error"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database error", "error": err.Error()})
 		return
 	}
 	if exists {
@@ -75,7 +77,8 @@ func (h *PermissionHandler) CreatePermission(c *gin.Context) {
 		req.Keyword, req.Endpoint, req.Method, req.Description,
 	).Scan(&resp.ID, &resp.Keyword, &resp.Endpoint, &resp.Method, &resp.Description, &resp.IsActive)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create permission"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create permission", "error": err.Error()})
 		return
 	}
 
@@ -86,7 +89,8 @@ func (h *PermissionHandler) GetAllPermissions(c *gin.Context) {
 	rows, err := h.DB.Query(context.Background(),
 		"SELECT id, keyword, endpoint, method, description, is_active FROM permissions")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query permissions"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query permissions", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -95,7 +99,8 @@ func (h *PermissionHandler) GetAllPermissions(c *gin.Context) {
 	for rows.Next() {
 		var p permissionResponse
 		if err := rows.Scan(&p.ID, &p.Keyword, &p.Endpoint, &p.Method, &p.Description, &p.IsActive); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan permission"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan permission", "error": err.Error()})
 			return
 		}
 		permissions = append(permissions, p)
@@ -116,7 +121,8 @@ func (h *PermissionHandler) CreateRole(c *gin.Context) {
 	err := h.DB.QueryRow(context.Background(),
 		"SELECT EXISTS(SELECT 1 FROM roles WHERE name = $1)", req.Name).Scan(&exists)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database error"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database error", "error": err.Error()})
 		return
 	}
 	if exists {
@@ -126,7 +132,8 @@ func (h *PermissionHandler) CreateRole(c *gin.Context) {
 
 	tx, err := h.DB.Begin(context.Background())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to begin transaction"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to begin transaction", "error": err.Error()})
 		return
 	}
 	defer tx.Rollback(context.Background())
@@ -141,7 +148,8 @@ func (h *PermissionHandler) CreateRole(c *gin.Context) {
 		req.Name, req.Description,
 	).Scan(&roleID, &roleName, &roleDesc, &roleActive)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create role"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create role", "error": err.Error()})
 		return
 	}
 
@@ -156,13 +164,15 @@ func (h *PermissionHandler) CreateRole(c *gin.Context) {
 		_, err = tx.Exec(context.Background(),
 			"INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)", roleID, permID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to assign permission to role"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to assign permission to role", "error": err.Error()})
 			return
 		}
 	}
 
 	if err := tx.Commit(context.Background()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to commit transaction"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to commit transaction", "error": err.Error()})
 		return
 	}
 
@@ -173,7 +183,8 @@ func (h *PermissionHandler) GetAllRoles(c *gin.Context) {
 	rows, err := h.DB.Query(context.Background(),
 		"SELECT id, name, description, is_active FROM roles")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query roles"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query roles", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -182,7 +193,8 @@ func (h *PermissionHandler) GetAllRoles(c *gin.Context) {
 	for rows.Next() {
 		var r roleResponse
 		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &r.IsActive); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan role"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan role", "error": err.Error()})
 			return
 		}
 		r.Permissions = []permissionResponse{}
@@ -234,7 +246,8 @@ func (h *PermissionHandler) AssignPermissions(c *gin.Context) {
 
 	tx, err := h.DB.Begin(context.Background())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to begin transaction"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to begin transaction", "error": err.Error()})
 		return
 	}
 	defer tx.Rollback(context.Background())
@@ -242,7 +255,8 @@ func (h *PermissionHandler) AssignPermissions(c *gin.Context) {
 	// Clear existing permissions
 	_, err = tx.Exec(context.Background(), "DELETE FROM role_permissions WHERE role_id = $1", roleID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to clear permissions"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to clear permissions", "error": err.Error()})
 		return
 	}
 
@@ -258,13 +272,15 @@ func (h *PermissionHandler) AssignPermissions(c *gin.Context) {
 		_, err = tx.Exec(context.Background(),
 			"INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)", roleID, permID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to assign permission"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to assign permission", "error": err.Error()})
 			return
 		}
 	}
 
 	if err := tx.Commit(context.Background()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to commit transaction"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to commit transaction", "error": err.Error()})
 		return
 	}
 

@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -168,7 +169,8 @@ func (h *AccountingHandler) CreateAccount(c *gin.Context) {
 		isPartsVendor, isCogsVendor, isStatementVendor, now, now,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create account"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create account", "error": err.Error()})
 		return
 	}
 
@@ -208,7 +210,8 @@ func (h *AccountingHandler) ListAccounts(c *gin.Context) {
 
 	rows, err := h.DB.Query(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query accounts"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query accounts", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -217,7 +220,8 @@ func (h *AccountingHandler) ListAccounts(c *gin.Context) {
 	for rows.Next() {
 		a, err := h.scanAccount(rows)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan account"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan account", "error": err.Error()})
 			return
 		}
 		accounts = append(accounts, a)
@@ -344,7 +348,8 @@ func (h *AccountingHandler) UpdateAccount(c *gin.Context) {
 		query := fmt.Sprintf("UPDATE chart_of_accounts SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
 		_, err := h.DB.Exec(context.Background(), query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update account"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update account", "error": err.Error()})
 			return
 		}
 	}
@@ -362,7 +367,8 @@ func (h *AccountingHandler) DeleteAccount(c *gin.Context) {
 
 	tag, err := h.DB.Exec(context.Background(), "DELETE FROM chart_of_accounts WHERE id = $1", accountID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete account"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete account", "error": err.Error()})
 		return
 	}
 	if tag.RowsAffected() == 0 {

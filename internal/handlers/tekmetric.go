@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -98,7 +99,8 @@ func (h *TekmetricHandler) tekmetricGet(endpoint string, params map[string]strin
 func (h *TekmetricHandler) GetShops(c *gin.Context) {
 	result, err := h.tekmetricGet("/api/v1/shops", nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error(), "error": err.Error()})
 		return
 	}
 
@@ -295,7 +297,8 @@ func (h *TekmetricHandler) GetRepairOrders(c *gin.Context) {
 
 	rows, err := h.DB.Query(context.Background(), dataQuery, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("query error: %v", err)})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("query error: %v", err), "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -506,7 +509,8 @@ func (h *TekmetricHandler) GetAllCustomersParallel(c *gin.Context) {
 	custRows, err := h.DB.Query(context.Background(),
 		"SELECT DISTINCT customer_id FROM tekmetric_repair_orders WHERE customer_id IS NOT NULL")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error(), "error": err.Error()})
 		return
 	}
 
@@ -521,7 +525,8 @@ func (h *TekmetricHandler) GetAllCustomersParallel(c *gin.Context) {
 	vehRows, err := h.DB.Query(context.Background(),
 		"SELECT DISTINCT vehicle_id FROM tekmetric_repair_orders WHERE vehicle_id IS NOT NULL")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error(), "error": err.Error()})
 		return
 	}
 
@@ -711,7 +716,8 @@ func (h *TekmetricHandler) GetJobByID(c *gin.Context) {
 
 	result, err := h.tekmetricGet(fmt.Sprintf("/api/v1/jobs/%s", jobID), nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error(), "error": err.Error()})
 		return
 	}
 

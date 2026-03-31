@@ -120,7 +120,8 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password", "error": err.Error()})
 		return
 	}
 
@@ -137,7 +138,8 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 		id, req.Email, string(hashedPassword), req.FirstName, req.LastName, req.MobileNumber, role,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create user"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create user", "error": err.Error()})
 		return
 	}
 
@@ -191,7 +193,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	tokenString, err := token.SignedString([]byte(h.SecretKey))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate token"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate token", "error": err.Error()})
 		return
 	}
 
@@ -243,7 +246,8 @@ func (h *AuthHandler) LoginDirect(c *gin.Context) {
 
 	tokenString, err := token.SignedString([]byte(h.SecretKey))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate token"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate token", "error": err.Error()})
 		return
 	}
 
@@ -289,7 +293,8 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 		"UPDATE users SET reset_password_token = $1, reset_password_expiry = $2 WHERE id = $3",
 		resetToken, expiry, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate reset token"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate reset token", "error": err.Error()})
 		return
 	}
 
@@ -324,7 +329,8 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password", "error": err.Error()})
 		return
 	}
 
@@ -332,7 +338,8 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 		"UPDATE users SET hashed_password = $1, reset_password_token = NULL, reset_password_expiry = NULL WHERE id = $2",
 		string(hashedPassword), userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("failed to reset password: %v", err)})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("failed to reset password: %v", err), "error": err.Error()})
 		return
 	}
 

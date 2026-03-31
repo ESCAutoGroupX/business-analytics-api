@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -140,7 +141,8 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 		acquisitionDate, startDate, endDate, req.Location, req.VendorID, now, now,
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create asset"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create asset", "error": err.Error()})
 		return
 	}
 
@@ -168,7 +170,8 @@ func (h *AssetHandler) GetAllAssets(c *gin.Context) {
 		 acquisition_date, start_date, end_date, location, vendor_id, created_at, updated_at
 		 FROM assets OFFSET $1 LIMIT $2`, skip, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query assets"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query assets", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -177,7 +180,8 @@ func (h *AssetHandler) GetAllAssets(c *gin.Context) {
 	for rows.Next() {
 		a, err := scanAsset(rows)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan asset"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan asset", "error": err.Error()})
 			return
 		}
 		assets = append(assets, a)
@@ -296,7 +300,8 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 		query := fmt.Sprintf("UPDATE assets SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
 		_, err = h.DB.Exec(context.Background(), query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update asset"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update asset", "error": err.Error()})
 			return
 		}
 	}
@@ -313,7 +318,8 @@ func (h *AssetHandler) DeleteAsset(c *gin.Context) {
 
 	tag, err := h.DB.Exec(context.Background(), "DELETE FROM assets WHERE id = $1", assetID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete asset"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete asset", "error": err.Error()})
 		return
 	}
 	if tag.RowsAffected() == 0 {

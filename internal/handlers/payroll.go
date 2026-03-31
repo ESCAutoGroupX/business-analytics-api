@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -128,7 +129,8 @@ func (h *PayrollHandler) CreatePayroll(c *gin.Context) {
 		req.LocationID, uid, time.Now().UTC(), time.Now().UTC(),
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create payroll"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create payroll", "error": err.Error()})
 		return
 	}
 
@@ -161,7 +163,8 @@ func (h *PayrollHandler) GetAllPayrolls(c *gin.Context) {
 
 	rows, err := h.DB.Query(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payrolls"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payrolls", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -271,7 +274,8 @@ func (h *PayrollHandler) UpdatePayroll(c *gin.Context) {
 	query := fmt.Sprintf("UPDATE payroll SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
 	_, err = h.DB.Exec(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update payroll"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update payroll", "error": err.Error()})
 		return
 	}
 
@@ -336,7 +340,8 @@ func (h *PayrollHandler) CreateAdjustment(c *gin.Context) {
 		uid, req.Notes, req.EmployeeName, time.Now().UTC(), time.Now().UTC(),
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create adjustment"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create adjustment", "error": err.Error()})
 		return
 	}
 
@@ -369,7 +374,8 @@ func (h *PayrollHandler) ListAdjustments(c *gin.Context) {
 
 	rows, err := h.DB.Query(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query adjustments"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query adjustments", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -478,7 +484,8 @@ func (h *PayrollHandler) UpdateAdjustment(c *gin.Context) {
 	query := fmt.Sprintf("UPDATE payroll_account_adjustments SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
 	_, err = h.DB.Exec(context.Background(), query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update adjustment"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update adjustment", "error": err.Error()})
 		return
 	}
 

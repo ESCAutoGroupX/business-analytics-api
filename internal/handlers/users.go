@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -141,7 +142,8 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 	rows, err := h.DB.Query(context.Background(),
 		`SELECT id FROM users OFFSET $1 LIMIT $2`, skip, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query users"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query users", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -206,7 +208,8 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password", "error": err.Error()})
 		return
 	}
 
@@ -224,7 +227,8 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		id, req.Email, string(hashedPassword), req.FirstName, req.LastName, req.MobileNumber, role, now,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create user"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create user", "error": err.Error()})
 		return
 	}
 
@@ -238,7 +242,8 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 
 	u, err := h.scanUserOut(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to read created user"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to read created user", "error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, u)
@@ -309,7 +314,8 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 
 	tag, err := h.DB.Exec(context.Background(), "DELETE FROM users WHERE id = $1", uid)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete user"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete user", "error": err.Error()})
 		return
 	}
 	if tag.RowsAffected() == 0 {

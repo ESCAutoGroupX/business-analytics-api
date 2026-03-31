@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -113,7 +114,8 @@ func (h *LocationHandler) CreateLocation(c *gin.Context) {
 		req.LocationName, req.AddressLine1, req.AddressLine2, req.City, req.StateProvince, req.PostalCode, req.Country, req.ShopID, now, now,
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create location"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create location", "error": err.Error()})
 		return
 	}
 
@@ -129,7 +131,8 @@ func (h *LocationHandler) GetAllLocations(c *gin.Context) {
 		`SELECT id, location_name, address_line_1, address_line_2, city, state_province, postal_code, country, shop_id, created_at, updated_at
 		 FROM locations OFFSET $1 LIMIT $2`, skip, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query locations"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query locations", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -140,7 +143,8 @@ func (h *LocationHandler) GetAllLocations(c *gin.Context) {
 		if err := rows.Scan(&loc.ID, &loc.LocationName, &loc.AddressLine1, &loc.AddressLine2,
 			&loc.City, &loc.StateProvince, &loc.PostalCode, &loc.Country, &loc.ShopID,
 			&loc.CreatedAt, &loc.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan location"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan location", "error": err.Error()})
 			return
 		}
 		locations = append(locations, loc)
@@ -242,7 +246,8 @@ func (h *LocationHandler) UpdateLocation(c *gin.Context) {
 		query := fmt.Sprintf("UPDATE locations SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
 		_, err = h.DB.Exec(context.Background(), query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update location"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update location", "error": err.Error()})
 			return
 		}
 	}
@@ -264,7 +269,8 @@ func (h *LocationHandler) DeleteLocation(c *gin.Context) {
 
 	tag, err := h.DB.Exec(context.Background(), "DELETE FROM locations WHERE id = $1", locationID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete location"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete location", "error": err.Error()})
 		return
 	}
 	if tag.RowsAffected() == 0 {
@@ -308,7 +314,8 @@ func (h *LocationHandler) CreateShopInfo(c *gin.Context) {
 		req.ShopName, req.ContactEmail, req.PDFForwardingEmail, now, now,
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create shop info"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create shop info", "error": err.Error()})
 		return
 	}
 
@@ -335,7 +342,8 @@ func (h *LocationHandler) GetAllShopInfos(c *gin.Context) {
 		`SELECT id, shop_name, contact_email, pdf_forwarding_email, created_at, updated_at
 		 FROM shop_info OFFSET $1 LIMIT $2`, skip, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query shop infos"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query shop infos", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -345,7 +353,8 @@ func (h *LocationHandler) GetAllShopInfos(c *gin.Context) {
 		var si shopInfoResponse
 		if err := rows.Scan(&si.ID, &si.ShopName, &si.ContactEmail, &si.PDFForwardingEmail,
 			&si.CreatedAt, &si.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan shop info"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan shop info", "error": err.Error()})
 			return
 		}
 		infos = append(infos, si)
@@ -402,7 +411,8 @@ func (h *LocationHandler) UpdateShopInfo(c *gin.Context) {
 		query := fmt.Sprintf("UPDATE shop_info SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
 		_, err = h.DB.Exec(context.Background(), query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update shop info"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update shop info", "error": err.Error()})
 			return
 		}
 	}
@@ -420,7 +430,8 @@ func (h *LocationHandler) DeleteShopInfo(c *gin.Context) {
 
 	tag, err := h.DB.Exec(context.Background(), "DELETE FROM shop_info WHERE id = $1", shopInfoID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete shop info"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete shop info", "error": err.Error()})
 		return
 	}
 	if tag.RowsAffected() == 0 {

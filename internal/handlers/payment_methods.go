@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -168,7 +169,8 @@ func (h *PaymentMethodHandler) CreatePaymentMethod(c *gin.Context) {
 		req.StartingCreditCardBal, req.SortingOrder, req.LocationID, now, now,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create payment method"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create payment method", "error": err.Error()})
 		return
 	}
 
@@ -185,7 +187,8 @@ func (h *PaymentMethodHandler) ListPaymentMethods(c *gin.Context) {
 		 starting_credit_card_bal, sorting_order, location_id, created_at, updated_at
 		 FROM payment_methods ORDER BY created_at DESC`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -198,7 +201,8 @@ func (h *PaymentMethodHandler) ListPaymentMethods(c *gin.Context) {
 			&pm.CardLast4Digits, &pm.CardName, &pm.Subtype, &pm.HolderCategory, &pm.BalanceAvailable, &pm.BalanceCurrent,
 			&pm.CreditLimit, &pm.IsoCurrencyCode, &pm.UnofficialCurrencyCode, &pm.TotalAmount, &pm.MinimumBalance,
 			&pm.StartingCreditCardBal, &pm.SortingOrder, &pm.LocationID, &pm.CreatedAt, &pm.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan payment method"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan payment method", "error": err.Error()})
 			return
 		}
 		methods = append(methods, pm)
@@ -344,7 +348,8 @@ func (h *PaymentMethodHandler) UpdatePaymentMethod(c *gin.Context) {
 		query := fmt.Sprintf("UPDATE payment_methods SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
 		_, err = h.DB.Exec(context.Background(), query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update payment method"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update payment method", "error": err.Error()})
 			return
 		}
 	}
@@ -362,7 +367,8 @@ func (h *PaymentMethodHandler) DeletePaymentMethod(c *gin.Context) {
 
 	tag, err := h.DB.Exec(context.Background(), "DELETE FROM payment_methods WHERE id = $1", pmID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete payment method"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete payment method", "error": err.Error()})
 		return
 	}
 	if tag.RowsAffected() == 0 {

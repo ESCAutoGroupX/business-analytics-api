@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -77,7 +78,8 @@ func (h *VendorHandler) CreateVendor(c *gin.Context) {
 		id, req.Name, req.Category, req.VendorType, shopName, req.IsPartsVendor, req.IsCogsVendor, req.IsStatementVendor, req.GLCodeID, now, now,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create vendor"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create vendor", "error": err.Error()})
 		return
 	}
 
@@ -91,7 +93,8 @@ func (h *VendorHandler) ListVendors(c *gin.Context) {
 		 FROM vendors v
 		 LEFT JOIN chart_of_accounts g ON v.gl_code_id = g.id`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query vendors"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query vendors", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -105,7 +108,8 @@ func (h *VendorHandler) ListVendors(c *gin.Context) {
 			&v.IsPartsVendor, &v.IsCogsVendor, &v.IsStatementVendor, &glCodeID,
 			&v.CreatedAt, &v.UpdatedAt,
 			&gID, &gName, &gType, &gSubType, &gDetailType, &gBalance, &gDesc); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan vendor"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan vendor", "error": err.Error()})
 			return
 		}
 		if gID != nil {
@@ -196,7 +200,8 @@ func (h *VendorHandler) PatchVendor(c *gin.Context) {
 		query := fmt.Sprintf("UPDATE vendors SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
 		_, err = h.DB.Exec(context.Background(), query, args...)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update vendor"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update vendor", "error": err.Error()})
 			return
 		}
 	}
@@ -209,7 +214,8 @@ func (h *VendorHandler) DeleteVendor(c *gin.Context) {
 
 	tag, err := h.DB.Exec(context.Background(), "DELETE FROM vendors WHERE id = $1", vendorID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete vendor"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete vendor", "error": err.Error()})
 		return
 	}
 	if tag.RowsAffected() == 0 {

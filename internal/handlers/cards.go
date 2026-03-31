@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -90,7 +91,8 @@ func (h *CardHandler) CreateCard(c *gin.Context) {
 		req.CardName, req.CardIDPlaid, req.BillingStartDay, req.BillingEndDay, cycleType, req.LastFourDigits, bankProvider, now, now,
 	).Scan(&id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "An unexpected error occurred while creating the card."})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "An unexpected error occurred while creating the card.", "error": err.Error()})
 		return
 	}
 
@@ -116,7 +118,8 @@ func (h *CardHandler) GetAllCards(c *gin.Context) {
 		`SELECT id, card_name, card_id_plaid, billing_start_day, billing_end_day, cycle_type, last_four_digits, bank_provider, created_at, updated_at
 		 FROM cards OFFSET $1 LIMIT $2`, skip, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query cards"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query cards", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -126,7 +129,8 @@ func (h *CardHandler) GetAllCards(c *gin.Context) {
 		var card cardResponse
 		if err := rows.Scan(&card.ID, &card.CardName, &card.CardIDPlaid, &card.BillingStartDay, &card.BillingEndDay,
 			&card.CycleType, &card.LastFourDigits, &card.BankProvider, &card.CreatedAt, &card.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan card"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan card", "error": err.Error()})
 			return
 		}
 		cards = append(cards, card)
@@ -207,7 +211,8 @@ func (h *CardHandler) UpdateCard(c *gin.Context) {
 				c.JSON(http.StatusBadRequest, gin.H{"detail": "A card with this card_id_plaid already exists."})
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "An unexpected error occurred while updating the card."})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "An unexpected error occurred while updating the card.", "error": err.Error()})
 			return
 		}
 	}
@@ -225,7 +230,8 @@ func (h *CardHandler) DeleteCard(c *gin.Context) {
 
 	tag, err := h.DB.Exec(context.Background(), "DELETE FROM cards WHERE id = $1", cardID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete card"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete card", "error": err.Error()})
 		return
 	}
 	if tag.RowsAffected() == 0 {
@@ -242,7 +248,8 @@ func (h *CardHandler) GetCustomCycleCards(c *gin.Context) {
 		`SELECT id, card_name, card_id_plaid, billing_start_day, billing_end_day, cycle_type, last_four_digits, bank_provider, created_at, updated_at
 		 FROM cards WHERE cycle_type = 'custom'`)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query cards"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query cards", "error": err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -252,7 +259,8 @@ func (h *CardHandler) GetCustomCycleCards(c *gin.Context) {
 		var card cardResponse
 		if err := rows.Scan(&card.ID, &card.CardName, &card.CardIDPlaid, &card.BillingStartDay, &card.BillingEndDay,
 			&card.CycleType, &card.LastFourDigits, &card.BankProvider, &card.CreatedAt, &card.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan card"})
+			log.Printf("ERROR: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan card", "error": err.Error()})
 			return
 		}
 		cards = append(cards, card)

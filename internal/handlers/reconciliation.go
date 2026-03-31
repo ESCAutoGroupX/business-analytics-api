@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"regexp"
@@ -185,7 +186,8 @@ func (h *ReconciliationHandler) DailyMatch(c *gin.Context) {
 
 	wpRows, err := h.DB.Query(context.Background(), wpQuery, wpArgs...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query worldpay transactions"})
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query worldpay transactions", "error": err.Error()})
 		return
 	}
 
