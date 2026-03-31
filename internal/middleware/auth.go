@@ -41,7 +41,11 @@ func Auth(secretKey string) gin.HandlerFunc {
 			return
 		}
 
-		c.Set("user_id", claims["user_id"])
+		userID := claims["user_id"]
+		if userID == nil {
+			userID = claims["sub"]
+		}
+		c.Set("user_id", userID)
 		c.Set("email", claims["email"])
 		c.Set("role", claims["role"])
 

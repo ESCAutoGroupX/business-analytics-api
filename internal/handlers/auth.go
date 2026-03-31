@@ -185,10 +185,10 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":   userID,
-		"email": email,
-		"role":  role,
-		"exp":   time.Now().Add(24 * time.Hour).Unix(),
+		"user_id": userID,
+		"email":   email,
+		"role":    role,
+		"exp":     time.Now().Add(24 * time.Hour).Unix(),
 	})
 
 	tokenString, err := token.SignedString([]byte(h.SecretKey))
@@ -238,10 +238,10 @@ func (h *AuthHandler) LoginDirect(c *gin.Context) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":   userID,
-		"email": email,
-		"role":  role,
-		"exp":   time.Now().Add(24 * time.Hour).Unix(),
+		"user_id": userID,
+		"email":   email,
+		"role":    role,
+		"exp":     time.Now().Add(24 * time.Hour).Unix(),
 	})
 
 	tokenString, err := token.SignedString([]byte(h.SecretKey))
