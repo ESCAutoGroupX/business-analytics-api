@@ -179,7 +179,7 @@ func (h *TwoFactorAuthHandler) VerifyOTP(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "OTP verified successfully",
-		"token":   tokenString,
+		"access_token": tokenString,
 	})
 }
 

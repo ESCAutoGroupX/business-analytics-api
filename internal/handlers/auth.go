@@ -90,7 +90,7 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"token": tokenString})
+	c.JSON(http.StatusOK, gin.H{"access_token": tokenString})
 }
 
 // POST /auth/signup
