@@ -59,7 +59,7 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 	var email, passwordHash, role string
 
 	err := h.DB.QueryRow(context.Background(),
-		"SELECT id, email, password_hash, role FROM users WHERE email = $1",
+		"SELECT id, email, hashed_password, role FROM users WHERE email = $1",
 		req.Email,
 	).Scan(&userID, &email, &passwordHash, &role)
 	if err != nil {
