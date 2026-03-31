@@ -56,7 +56,7 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 		return
 	}
 
-	var userID int
+	var userID string
 	var email, passwordHash, role string
 
 	err := h.DB.QueryRow(context.Background(),
