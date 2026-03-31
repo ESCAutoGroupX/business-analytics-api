@@ -64,7 +64,7 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 		req.Email,
 	).Scan(&userID, &email, &passwordHash, &role)
 	found := err == nil
-	log.Printf("SignIn: email=%s found=%v", req.Email, found)
+	log.Printf("SignIn: email=%s found=%v err=%v", req.Email, found, err)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
 		return
