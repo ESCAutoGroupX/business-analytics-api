@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -62,15 +63,19 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 		"SELECT id, email, hashed_password, role FROM users WHERE email = $1",
 		req.Email,
 	).Scan(&userID, &email, &passwordHash, &role)
+	found := err == nil
+	log.Printf("SignIn: email=%s found=%v", req.Email, found)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		log.Printf("SignIn: bcrypt compare result: %v", err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
 		return
 	}
+	log.Printf("SignIn: bcrypt compare result: %v", nil)
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": userID,
