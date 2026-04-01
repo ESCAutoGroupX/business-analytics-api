@@ -42,56 +42,32 @@ func BankBalance(c *gin.Context) {
 func (h *DashboardHandler) GetBankBalance(c *gin.Context) {
 	ctx := context.Background()
 
-	rows, err := h.DB.Query(ctx,
-		`SELECT id, COALESCE(title, ''), COALESCE(bank_name, ''),
-		        COALESCE(balance_available, 0), COALESCE(balance_current, 0),
-		        COALESCE(starting_credit_card_bal, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
-		 ORDER BY sorting_order, created_at`)
+	// Get sum of starting balances from DEPOSITORY payment methods
+	var startingTotal float64
+	err := h.DB.QueryRow(ctx,
+		`SELECT COALESCE(SUM(starting_credit_card_bal), 0)
+		 FROM payment_methods WHERE method_type = 'DEPOSITORY'`).Scan(&startingTotal)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	type acct struct {
-		ID               string
-		Title            string
-		BankName         string
-		BalanceAvailable float64
-		BalanceCurrent   float64
-		StartingBal      float64
-	}
-	var accounts []acct
-	for rows.Next() {
-		var a acct
-		if err := rows.Scan(&a.ID, &a.Title, &a.BankName, &a.BalanceAvailable, &a.BalanceCurrent, &a.StartingBal); err != nil {
-			continue
-		}
-		accounts = append(accounts, a)
+	// Sum all depository transaction amounts
+	var txTotal float64
+	err = h.DB.QueryRow(ctx,
+		`SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE account_type = 'depository'`).Scan(&txTotal)
+	if err != nil {
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions", "error": err.Error()})
+		return
 	}
 
-	totalBalance := 0.0
-	for _, a := range accounts {
-		txRows, err := h.DB.Query(ctx,
-			`SELECT COALESCE(amount, 0) FROM transactions WHERE account_id = $1 ORDER BY date, created_at`, a.ID)
-		if err != nil {
-			continue
-		}
-		balance := a.StartingBal
-		for txRows.Next() {
-			var amt float64
-			txRows.Scan(&amt)
-			balance += amt * -1
-		}
-		txRows.Close()
-		totalBalance += round2(balance)
-	}
+	totalBalance := round2(startingTotal + txTotal*-1)
 
 	c.JSON(http.StatusOK, gin.H{
 		"totals": gin.H{
-			"total_balance_available": round2(totalBalance),
+			"total_balance_available": totalBalance,
 		},
 	})
 }
@@ -142,7 +118,7 @@ func (h *DashboardHandler) GetPaymentMethod(c *gin.Context) {
 
 	for _, a := range accounts {
 		txRows, err := h.DB.Query(ctx,
-			`SELECT COALESCE(amount, 0) FROM transactions WHERE account_id = $1 ORDER BY date, created_at`, a.ID)
+			`SELECT COALESCE(amount, 0) FROM transactions WHERE account_type = 'credit' AND account_id = $1 ORDER BY date, created_at`, a.ID)
 		if err != nil {
 			continue
 		}
@@ -229,25 +205,16 @@ func (h *DashboardHandler) GetCreditCardBalanceList(c *gin.Context) {
 		pms = append(pms, p)
 	}
 
-	// Build transaction query for all matching accounts
-	accountIDs := []string{}
-	startingBals := map[string]float64{}
-	for _, p := range pms {
-		accountIDs = append(accountIDs, p.ID)
-		startingBals[p.ID] = p.StartingBal
-	}
+	// Build WHERE for transactions — filter directly by account_type
+	txWhere := "WHERE account_type = 'credit'"
+	txArgs := []interface{}{}
+	txArgIdx := 1
 
-	if len(accountIDs) == 0 {
-		c.JSON(http.StatusOK, gin.H{"data": []interface{}{}, "pagination": gin.H{
-			"page": page, "page_size": pageSize, "total_pages": 0, "total_records": 0,
-		}})
-		return
+	if accountID != "" {
+		txWhere += fmt.Sprintf(" AND account_id = $%d", txArgIdx)
+		txArgs = append(txArgs, accountID)
+		txArgIdx++
 	}
-
-	// Build WHERE for transactions
-	txWhere := "WHERE account_id = ANY($1)"
-	txArgs := []interface{}{accountIDs}
-	txArgIdx := 2
 
 	if startDate != "" {
 		txWhere += fmt.Sprintf(" AND date >= $%d", txArgIdx)
@@ -383,7 +350,7 @@ func (h *DashboardHandler) GetBankBalanceTrans(c *gin.Context) {
 		txRows, err := h.DB.Query(ctx,
 			`SELECT id, COALESCE(date::text, ''), COALESCE(amount, 0), COALESCE(vendor, ''),
 			        COALESCE(name, ''), COALESCE(transaction_type, ''), COALESCE(merchant_name, '')
-			 FROM transactions WHERE account_id = $1
+			 FROM transactions WHERE account_type = 'depository' AND account_id = $1
 			 ORDER BY date, created_at`, a.ID)
 		if err != nil {
 			continue
@@ -462,7 +429,7 @@ func (h *DashboardHandler) GetBankBalanceTrends(c *gin.Context) {
 		// Get all transactions up to end of range, ordered by date
 		txRows, err := h.DB.Query(ctx,
 			`SELECT COALESCE(date::text, ''), COALESCE(amount, 0)
-			 FROM transactions WHERE account_id = $1
+			 FROM transactions WHERE account_type = 'depository' AND account_id = $1
 			 ORDER BY date, created_at`, pm.ID)
 		if err != nil {
 			continue
@@ -543,42 +510,22 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 	paymentType := c.Query("payment_type")
 	vendorName := c.Query("vendor_name")
 
-	// Get all DEPOSITORY account IDs and starting balances
-	pmRows, err := h.DB.Query(ctx,
-		`SELECT id, COALESCE(starting_credit_card_bal, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
-		 ORDER BY sorting_order, created_at`)
+	// Get initial total balance from DEPOSITORY payment methods
+	var initialTotalBalance float64
+	err := h.DB.QueryRow(ctx,
+		`SELECT COALESCE(SUM(starting_credit_card_bal), 0)
+		 FROM payment_methods WHERE method_type = 'DEPOSITORY'`).Scan(&initialTotalBalance)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
-	defer pmRows.Close()
-
-	var accountIDs []string
-	initialTotalBalance := 0.0
-	for pmRows.Next() {
-		var id string
-		var startBal float64
-		pmRows.Scan(&id, &startBal)
-		accountIDs = append(accountIDs, id)
-		initialTotalBalance += startBal
-	}
 	initialTotalBalance = round2(initialTotalBalance)
 
-	if len(accountIDs) == 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"initial_total_balance": 0, "final_overall_balance": 0,
-			"total_transactions": 0, "page": page, "page_size": pageSize,
-			"total_pages": 0, "sort_by": sortBy, "sort_order": sortOrder, "ledger": []interface{}{},
-		})
-		return
-	}
-
-	// Build WHERE clause
-	where := "WHERE account_id = ANY($1)"
-	args := []interface{}{accountIDs}
-	argIdx := 2
+	// Build WHERE clause filtering transactions directly by account_type
+	where := "WHERE account_type = 'depository'"
+	args := []interface{}{}
+	argIdx := 1
 
 	if startDate != "" {
 		where += fmt.Sprintf(" AND date >= $%d", argIdx)
@@ -853,7 +800,7 @@ func (h *DashboardHandler) GetCreditCardBalancesMonthly(c *gin.Context) {
 	for _, pm := range pms {
 		txRows, err := h.DB.Query(ctx,
 			`SELECT COALESCE(date::text, ''), COALESCE(amount, 0)
-			 FROM transactions WHERE account_id = $1
+			 FROM transactions WHERE account_type = 'depository' AND account_id = $1
 			 ORDER BY date, created_at`, pm.ID)
 		if err != nil {
 			continue
@@ -956,7 +903,7 @@ func (h *DashboardHandler) GetCreditCardBalancesWeekly(c *gin.Context) {
 	for _, pm := range pms {
 		txRows, err := h.DB.Query(ctx,
 			`SELECT COALESCE(date::text, ''), COALESCE(amount, 0)
-			 FROM transactions WHERE account_id = $1
+			 FROM transactions WHERE account_type = 'depository' AND account_id = $1
 			 ORDER BY date, created_at`, pm.ID)
 		if err != nil {
 			continue
@@ -1072,7 +1019,7 @@ func (h *DashboardHandler) GetCredit(c *gin.Context) {
 	for _, pm := range pms {
 		txRows, err := h.DB.Query(ctx,
 			`SELECT COALESCE(date::text, ''), COALESCE(amount, 0)
-			 FROM transactions WHERE account_id = $1
+			 FROM transactions WHERE account_type = 'credit' AND account_id = $1
 			 ORDER BY date, created_at`, pm.ID)
 		if err != nil {
 			continue
@@ -1236,7 +1183,7 @@ func (h *DashboardHandler) GetLowBalanceAccount(c *gin.Context) {
 	for _, a := range accounts {
 		// Compute running balance
 		txRows, err := h.DB.Query(ctx,
-			`SELECT COALESCE(amount, 0) FROM transactions WHERE account_id = $1 ORDER BY date, created_at`, a.ID)
+			`SELECT COALESCE(amount, 0) FROM transactions WHERE account_type = 'depository' AND account_id = $1 ORDER BY date, created_at`, a.ID)
 		if err != nil {
 			continue
 		}
@@ -1274,7 +1221,7 @@ func (h *DashboardHandler) GetLowBalanceAccount(c *gin.Context) {
 		txRows, err := h.DB.Query(ctx,
 			`SELECT id, COALESCE(account_id, ''), COALESCE(date::text, ''), COALESCE(amount, 0),
 			        COALESCE(vendor, ''), COALESCE(name, ''), COALESCE(transaction_type, '')
-			 FROM transactions WHERE account_id = ANY($1)
+			 FROM transactions WHERE account_type = 'depository' AND account_id = ANY($1)
 			 ORDER BY date DESC, created_at DESC LIMIT 10`, lowAcctIDs)
 		if err == nil {
 			for txRows.Next() {
@@ -1474,7 +1421,7 @@ func (h *DashboardHandler) GetItemsNeedAttention(c *gin.Context) {
 			// Compute balance
 			balance := startBal
 			txRows, txErr := h.DB.Query(ctx,
-				`SELECT COALESCE(amount, 0) FROM transactions WHERE account_id = $1 ORDER BY date, created_at`, id)
+				`SELECT COALESCE(amount, 0) FROM transactions WHERE account_type = 'depository' AND account_id = $1 ORDER BY date, created_at`, id)
 			if txErr == nil {
 				for txRows.Next() {
 					var amt float64
