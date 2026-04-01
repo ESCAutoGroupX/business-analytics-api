@@ -1224,11 +1224,19 @@ func (h *DashboardHandler) GetLowBalanceAccount(c *gin.Context) {
 
 	transactions := []gin.H{}
 	if len(lowAcctIDs) > 0 {
+		// Build IN clause for account IDs
+		placeholders := make([]string, len(lowAcctIDs))
+		inArgs := make([]interface{}, len(lowAcctIDs))
+		for i, id := range lowAcctIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			inArgs[i] = id
+		}
+		inClause := strings.Join(placeholders, ", ")
 		txRows, err := h.sqlDB().QueryContext(ctx,
-			`SELECT id, COALESCE(account_id, ''), COALESCE(date::text, ''), COALESCE(amount, 0),
+			fmt.Sprintf(`SELECT id, COALESCE(account_id, ''), COALESCE(date::text, ''), COALESCE(amount, 0),
 			        COALESCE(vendor, ''), COALESCE(name, ''), COALESCE(transaction_type, '')
-			 FROM transactions WHERE account_type = 'depository' AND account_id = ANY($1)
-			 ORDER BY date DESC, created_at DESC LIMIT 10`, lowAcctIDs)
+			 FROM transactions WHERE account_type = 'depository' AND account_id IN (%s)
+			 ORDER BY date DESC, created_at DESC LIMIT 10`, inClause), inArgs...)
 		if err == nil {
 			for txRows.Next() {
 				var txID, acctID, dateStr, vendor, name, txType string
