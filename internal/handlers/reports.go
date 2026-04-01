@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,12 +8,13 @@ import (
 	"sort"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type ReportHandler struct {
-	DB  *pgxpool.Pool
-	Cfg interface{} // for future Tekmetric config
+	GormDB *gorm.DB
 }
 
 // GET /reports/profit-loss
@@ -36,34 +36,31 @@ func (h *ReportHandler) ProfitLossReport(c *gin.Context) {
 		}
 	}
 
-	// Build query dynamically
-	query := "SELECT date, amount, category, location FROM transactions WHERE 1=1"
-	args := []interface{}{}
-	argIdx := 1
+	query := h.GormDB.Model(&models.Transaction{}).Select("date, amount, category, location")
 
 	if startDate != "" {
-		query += fmt.Sprintf(" AND date >= $%d", argIdx)
-		args = append(args, startDate)
-		argIdx++
+		query = query.Where("date >= ?", startDate)
 	}
 	if endDate != "" {
-		query += fmt.Sprintf(" AND date <= $%d", argIdx)
-		args = append(args, endDate)
-		argIdx++
+		query = query.Where("date <= ?", endDate)
 	}
 	if location != "" {
-		query += fmt.Sprintf(" AND location LIKE $%d", argIdx)
-		args = append(args, "%"+location+"%")
-		argIdx++
+		query = query.Where("location LIKE ?", "%"+location+"%")
 	}
 
-	rows, err := h.DB.Query(context.Background(), query, args...)
-	if err != nil {
+	type txRow struct {
+		Date     *string
+		Amount   *float64
+		Category *string
+		Location *string
+	}
+
+	var rows []txRow
+	if err := query.Find(&rows).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Internal server error: %s", err.Error()), "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
 	type reportEntry struct {
 		GrossSales          float64            `json:"gross_sales"`
@@ -73,53 +70,17 @@ func (h *ReportHandler) ProfitLossReport(c *gin.Context) {
 	}
 
 	grossPerDay := map[string]float64{}
-	categoryReport := map[string]map[string]float64{}
 
-	for rows.Next() {
-		var date *string
-		var amount *float64
-		var categoryJSON, locationJSON *string
-
-		if err := rows.Scan(&date, &amount, &categoryJSON, &locationJSON); err != nil {
+	for _, row := range rows {
+		if row.Date == nil {
 			continue
 		}
-
-		if date == nil {
-			continue
-		}
-		day := *date
+		day := *row.Date
 		amt := 0.0
-		if amount != nil {
-			amt = *amount
+		if row.Amount != nil {
+			amt = *row.Amount
 		}
-
 		grossPerDay[day] += amt
-
-		// Category-based aggregation
-		categoryName := "Uncategorized"
-		if categoryJSON != nil && *categoryJSON != "" {
-			var catMap map[string]interface{}
-			if err := json.Unmarshal([]byte(*categoryJSON), &catMap); err == nil {
-				if primary, ok := catMap["primary"].(string); ok {
-					categoryName = primary
-				}
-			}
-		}
-
-		loc := "Unknown"
-		if locationJSON != nil && *locationJSON != "" {
-			var locMap map[string]interface{}
-			if err := json.Unmarshal([]byte(*locationJSON), &locMap); err == nil {
-				if city, ok := locMap["city"].(string); ok {
-					loc = city
-				}
-			}
-		}
-
-		if categoryReport[categoryName] == nil {
-			categoryReport[categoryName] = map[string]float64{}
-		}
-		categoryReport[categoryName][loc] += amt
 	}
 
 	// Build daily report
@@ -159,80 +120,73 @@ func (h *ReportHandler) CreditCardSummary(c *gin.Context) {
 		return
 	}
 
-	query := `SELECT t.id, t.date, t.vendor, t.amount, t.source, t.location,
-	          pm.title AS pm_title,
-	          l.location_name AS loc_name
-	          FROM transactions t
-	          LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-	          LEFT JOIN locations l ON pm.location_id = l.id
-	          WHERE 1=1`
-	args := []interface{}{}
-	argIdx := 1
+	// This query joins transactions with payment_methods and locations.
+	// Keep as raw SQL via GORM since it involves multi-table joins with specific column aliases.
+	query := h.GormDB.Table("transactions t").
+		Select(`t.id, t.date, t.vendor, t.amount, t.source, t.location,
+		        pm.title AS pm_title,
+		        l.location_name AS loc_name`).
+		Joins("LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id").
+		Joins("LEFT JOIN locations l ON pm.location_id::int = l.id")
 
 	if startDate != "" {
-		query += fmt.Sprintf(" AND t.date >= $%d", argIdx)
-		args = append(args, startDate)
-		argIdx++
+		query = query.Where("t.date >= ?", startDate)
 	}
 	if endDate != "" {
-		query += fmt.Sprintf(" AND t.date <= $%d", argIdx)
-		args = append(args, endDate)
-		argIdx++
+		query = query.Where("t.date <= ?", endDate)
 	}
 	if location != "" {
-		query += fmt.Sprintf(" AND t.location LIKE $%d", argIdx)
-		args = append(args, "%"+location+"%")
-		argIdx++
+		query = query.Where("t.location LIKE ?", "%"+location+"%")
 	}
 	if cardName != "" {
-		query += fmt.Sprintf(" AND t.source LIKE $%d", argIdx)
-		args = append(args, "%"+cardName+"%")
-		argIdx++
+		query = query.Where("t.source LIKE ?", "%"+cardName+"%")
 	}
 
-	rows, err := h.DB.Query(context.Background(), query, args...)
-	if err != nil {
+	type ccRow struct {
+		ID       *int
+		Date     *string
+		Vendor   *string
+		Amount   *float64
+		Source   *string
+		Location *string
+		PmTitle  *string
+		LocName  *string
+	}
+
+	var rows []ccRow
+	if err := query.Find(&rows).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Internal server error: %s", err.Error()), "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
 	results := []map[string]string{}
 
-	for rows.Next() {
-		var txID *int
-		var date, vendor, source, locationData, pmTitle, locName *string
-		var amount *float64
-
-		if err := rows.Scan(&txID, &date, &vendor, &amount, &source, &locationData, &pmTitle, &locName); err != nil {
-			continue
-		}
-
+	for _, row := range rows {
 		dateStr := "Unknown"
-		if date != nil {
-			dateStr = *date
+		if row.Date != nil {
+			dateStr = *row.Date
 		}
 		vendorStr := "Unknown"
-		if vendor != nil {
-			vendorStr = *vendor
+		if row.Vendor != nil {
+			vendorStr = *row.Vendor
 		}
 		amountStr := "$0.00"
-		if amount != nil {
-			amountStr = fmt.Sprintf("$%.2f", *amount)
+		if row.Amount != nil {
+			amountStr = fmt.Sprintf("$%.2f", *row.Amount)
 		}
 
 		card := ""
-		if pmTitle != nil {
-			card = *pmTitle
+		if row.PmTitle != nil {
+			card = *row.PmTitle
 		}
 
 		locationName := ""
-		if locName != nil {
-			locationName = *locName
-		} else if locationData != nil && *locationData != "" {
+		if row.LocName != nil {
+			locationName = *row.LocName
+		} else if row.Location != nil && *row.Location != "" {
 			var locMap map[string]interface{}
-			if err := json.Unmarshal([]byte(*locationData), &locMap); err == nil {
+			if err := json.Unmarshal([]byte(*row.Location), &locMap); err == nil {
 				if ln, ok := locMap["location_name"].(string); ok {
 					locationName = ln
 				}
@@ -240,17 +194,17 @@ func (h *ReportHandler) CreditCardSummary(c *gin.Context) {
 		}
 
 		flag := "Duplicate"
-		if amount != nil {
-			if *amount < 500 {
+		if row.Amount != nil {
+			if *row.Amount < 500 {
 				flag = "Verified"
-			} else if *amount > 1000 {
+			} else if *row.Amount > 1000 {
 				flag = "Suspicious"
 			}
 		}
 
 		action := "Unknown"
-		if txID != nil {
-			action = fmt.Sprintf("/transactions/%d/details", *txID)
+		if row.ID != nil {
+			action = fmt.Sprintf("/transactions/%d/details", *row.ID)
 		}
 
 		results = append(results, map[string]string{

@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"crypto/rand"
 	"fmt"
 	"log"
@@ -11,11 +10,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type TwoFactorAuthHandler struct {
-	DB        *pgxpool.Pool
+	GormDB    *gorm.DB
 	SecretKey string
 }
 
@@ -42,25 +43,25 @@ func (h *TwoFactorAuthHandler) SendMobileOTP(c *gin.Context) {
 		return
 	}
 
-	var exists bool
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", userID).Scan(&exists)
-	if err != nil || !exists {
+	var user models.User
+	if err := h.GormDB.First(&user, "id = ?", userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
 
 	// Update preferred_auth_method if not already mobile_otp
-	h.DB.Exec(context.Background(),
-		"UPDATE users SET preferred_auth_method = $1 WHERE id = $2 AND (preferred_auth_method IS NULL OR preferred_auth_method != $1)",
-		"mobile_otp", userID)
+	method := "mobile_otp"
+	if user.PreferredAuthMethod == nil || *user.PreferredAuthMethod != method {
+		h.GormDB.Model(&user).Update("preferred_auth_method", method)
+	}
 
 	otp := generateOTP()
 	expiry := time.Now().UTC().Add(10 * time.Minute)
 
-	h.DB.Exec(context.Background(),
-		"UPDATE users SET otp = $1, otp_expiry = $2 WHERE id = $3",
-		otp, expiry, userID)
+	h.GormDB.Model(&user).Updates(map[string]interface{}{
+		"otp":        otp,
+		"otp_expiry": expiry,
+	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "OTP sent to your mobile number"})
 }
@@ -73,24 +74,24 @@ func (h *TwoFactorAuthHandler) SendEmailVerification(c *gin.Context) {
 		return
 	}
 
-	var exists bool
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", userID).Scan(&exists)
-	if err != nil || !exists {
+	var user models.User
+	if err := h.GormDB.First(&user, "id = ?", userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
 
-	h.DB.Exec(context.Background(),
-		"UPDATE users SET preferred_auth_method = $1 WHERE id = $2 AND (preferred_auth_method IS NULL OR preferred_auth_method != $1)",
-		"email_otp", userID)
+	method := "email_otp"
+	if user.PreferredAuthMethod == nil || *user.PreferredAuthMethod != method {
+		h.GormDB.Model(&user).Update("preferred_auth_method", method)
+	}
 
 	otp := generateOTP()
 	expiry := time.Now().UTC().Add(10 * time.Minute)
 
-	h.DB.Exec(context.Background(),
-		"UPDATE users SET otp = $1, otp_expiry = $2 WHERE id = $3",
-		otp, expiry, userID)
+	h.GormDB.Model(&user).Updates(map[string]interface{}{
+		"otp":        otp,
+		"otp_expiry": expiry,
+	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "OTP sent to your email address"})
 }
@@ -103,17 +104,16 @@ func (h *TwoFactorAuthHandler) SetupAuthenticator(c *gin.Context) {
 		return
 	}
 
-	var exists bool
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", userID).Scan(&exists)
-	if err != nil || !exists {
+	var user models.User
+	if err := h.GormDB.First(&user, "id = ?", userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
 
-	h.DB.Exec(context.Background(),
-		"UPDATE users SET preferred_auth_method = $1 WHERE id = $2 AND (preferred_auth_method IS NULL OR preferred_auth_method != $1)",
-		"authenticator_app", userID)
+	method := "authenticator_app"
+	if user.PreferredAuthMethod == nil || *user.PreferredAuthMethod != method {
+		h.GormDB.Model(&user).Update("preferred_auth_method", method)
+	}
 
 	// Generate a random base32-like secret
 	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
@@ -124,15 +124,13 @@ func (h *TwoFactorAuthHandler) SetupAuthenticator(c *gin.Context) {
 	}
 	secretStr := string(secret)
 
-	h.DB.Exec(context.Background(),
-		"UPDATE users SET authenticator_secret = $1 WHERE id = $2",
-		secretStr, userID)
+	h.GormDB.Model(&user).Update("authenticator_secret", secretStr)
 
 	qrURL := fmt.Sprintf("/static/qrcodes/%s_qrcode.png", userID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":      "Authenticator app setup complete",
-		"qr_code_url":  qrURL,
+		"message":     "Authenticator app setup complete",
+		"qr_code_url": qrURL,
 	})
 }
 
@@ -146,25 +144,19 @@ func (h *TwoFactorAuthHandler) VerifyOTP(c *gin.Context) {
 		return
 	}
 
-	var storedOTP *string
-	var otpExpiry *time.Time
-	var uid string
-
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT id, otp, otp_expiry FROM users WHERE id = $1", userID,
-	).Scan(&uid, &storedOTP, &otpExpiry)
-	if err != nil {
+	var user models.User
+	if err := h.GormDB.First(&user, "id = ?", userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
 
-	if storedOTP == nil || *storedOTP != otpParam || otpExpiry == nil || otpExpiry.Before(time.Now().UTC()) {
+	if user.OTP == nil || *user.OTP != otpParam || user.OTPExpiry == nil || user.OTPExpiry.Before(time.Now().UTC()) {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid or expired OTP"})
 		return
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub": uid,
+		"sub": user.ID,
 		"exp": time.Now().Add(24 * time.Hour).Unix(),
 	})
 
@@ -178,7 +170,7 @@ func (h *TwoFactorAuthHandler) VerifyOTP(c *gin.Context) {
 	c.SetCookie("access_token", "Bearer "+tokenString, 86400, "/", "", false, true)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "OTP verified successfully",
+		"message":      "OTP verified successfully",
 		"access_token": tokenString,
 	})
 }
@@ -193,14 +185,13 @@ func (h *TwoFactorAuthHandler) ResendOTP(c *gin.Context) {
 		return
 	}
 
-	var currentMethod *string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT preferred_auth_method FROM users WHERE id = $1", userID,
-	).Scan(&currentMethod)
-	if err != nil {
+	var user models.User
+	if err := h.GormDB.First(&user, "id = ?", userID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
+
+	currentMethod := user.PreferredAuthMethod
 
 	if currentMethod == nil || *currentMethod == "" {
 		if preferredMethod == "" {
@@ -212,8 +203,7 @@ func (h *TwoFactorAuthHandler) ResendOTP(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid preferred authentication method. Allowed values are 'mobile_otp', 'email_otp', 'authenticator_app'."})
 			return
 		}
-		h.DB.Exec(context.Background(),
-			"UPDATE users SET preferred_auth_method = $1 WHERE id = $2", preferredMethod, userID)
+		h.GormDB.Model(&user).Update("preferred_auth_method", preferredMethod)
 		currentMethod = &preferredMethod
 	}
 
@@ -222,12 +212,10 @@ func (h *TwoFactorAuthHandler) ResendOTP(c *gin.Context) {
 
 	switch *currentMethod {
 	case "mobile_otp":
-		h.DB.Exec(context.Background(),
-			"UPDATE users SET otp = $1, otp_expiry = $2 WHERE id = $3", otp, expiry, userID)
+		h.GormDB.Model(&user).Updates(map[string]interface{}{"otp": otp, "otp_expiry": expiry})
 		c.JSON(http.StatusOK, gin.H{"message": "OTP resent to your mobile number"})
 	case "email_otp":
-		h.DB.Exec(context.Background(),
-			"UPDATE users SET otp = $1, otp_expiry = $2 WHERE id = $3", otp, expiry, userID)
+		h.GormDB.Model(&user).Updates(map[string]interface{}{"otp": otp, "otp_expiry": expiry})
 		c.JSON(http.StatusOK, gin.H{"message": "OTP resent to your email address"})
 	case "authenticator_app":
 		c.JSON(http.StatusOK, gin.H{"message": "Authenticator app is set as the preferred method. Please use your authenticator app to generate the OTP."})

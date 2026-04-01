@@ -1,20 +1,20 @@
 package handlers
 
 import (
-	"context"
-	"fmt"
+	"errors"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type VendorHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 type vendorCreateRequest struct {
@@ -53,6 +53,30 @@ type vendorResponse struct {
 	GLCode            interface{} `json:"gl_code"`
 }
 
+func vendorToResponse(v *models.Vendor) vendorResponse {
+	resp := vendorResponse{
+		ID:                v.ID,
+		Name:              v.Name,
+		Category:          v.Category,
+		VendorType:        v.VendorType,
+		ShopName:          v.ShopName,
+		IsCogsVendor:      v.IsCogsVendor != nil && *v.IsCogsVendor,
+		IsStatementVendor: v.IsStatementVendor != nil && *v.IsStatementVendor,
+		CreatedAt:         &v.CreatedAt,
+		UpdatedAt:         &v.UpdatedAt,
+	}
+	if v.IsPartsVendor != nil {
+		resp.IsPartsVendor = *v.IsPartsVendor
+	}
+	if v.GLCode != nil {
+		resp.GLCode = gin.H{
+			"id": v.GLCode.ID, "name": v.GLCode.Name,
+			"account_type": v.GLCode.AccountType, "description": v.GLCode.Description,
+		}
+	}
+	return resp
+}
+
 func (h *VendorHandler) CreateVendor(c *gin.Context) {
 	var req vendorCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -64,63 +88,44 @@ func (h *VendorHandler) CreateVendor(c *gin.Context) {
 		req.IsPartsVendor = "NEVER"
 	}
 
-	id := uuid.New().String()
-	now := time.Now().UTC()
+	isCogsVendor := req.IsCogsVendor
+	isStatementVendor := req.IsStatementVendor
 
-	shopName := ""
-	if req.ShopName != nil {
-		shopName = *req.ShopName
+	vendor := models.Vendor{
+		ID:                uuid.New().String(),
+		Name:              req.Name,
+		Category:          req.Category,
+		VendorType:        req.VendorType,
+		ShopName:          req.ShopName,
+		IsPartsVendor:     &req.IsPartsVendor,
+		IsCogsVendor:      &isCogsVendor,
+		IsStatementVendor: &isStatementVendor,
+		GLCodeID:          req.GLCodeID,
 	}
 
-	_, err := h.DB.Exec(context.Background(),
-		`INSERT INTO vendors (id, name, category, vendor_type, shop_name, is_parts_vendor, is_cogs_vendor, is_statement_vendor, gl_code_id, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		id, req.Name, req.Category, req.VendorType, shopName, req.IsPartsVendor, req.IsCogsVendor, req.IsStatementVendor, req.GLCodeID, now, now,
-	)
-	if err != nil {
+	if err := h.GormDB.Create(&vendor).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create vendor", "error": err.Error()})
 		return
 	}
 
-	h.getVendorByID(c, id)
+	h.getVendorByID(c, vendor.ID)
 }
 
 func (h *VendorHandler) ListVendors(c *gin.Context) {
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT v.id, v.name, v.category, v.vendor_type, v.shop_name, v.is_parts_vendor, v.is_cogs_vendor, v.is_statement_vendor, v.gl_code_id, v.created_at, v.updated_at,
-		        g.id, g.name, g.account_type, g.description
-		 FROM vendors v
-		 LEFT JOIN chart_of_accounts g ON v.gl_code_id = g.id`)
-	if err != nil {
+	var vendors []models.Vendor
+	if err := h.GormDB.Preload("GLCode").Find(&vendors).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query vendors", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	vendors := []vendorResponse{}
-	for rows.Next() {
-		var v vendorResponse
-		var glCodeID, gID, gName, gType, gDesc *string
-		if err := rows.Scan(&v.ID, &v.Name, &v.Category, &v.VendorType, &v.ShopName,
-			&v.IsPartsVendor, &v.IsCogsVendor, &v.IsStatementVendor, &glCodeID,
-			&v.CreatedAt, &v.UpdatedAt,
-			&gID, &gName, &gType, &gDesc); err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan vendor", "error": err.Error()})
-			return
-		}
-		if gID != nil {
-			v.GLCode = gin.H{
-				"id": *gID, "name": gName, "account_type": gType,
-				"description": gDesc,
-			}
-		}
-		vendors = append(vendors, v)
+	result := make([]vendorResponse, len(vendors))
+	for i := range vendors {
+		result[i] = vendorToResponse(&vendors[i])
 	}
 
-	c.JSON(http.StatusOK, vendors)
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *VendorHandler) GetVendor(c *gin.Context) {
@@ -131,9 +136,8 @@ func (h *VendorHandler) GetVendor(c *gin.Context) {
 func (h *VendorHandler) PatchVendor(c *gin.Context) {
 	vendorID := c.Param("vendor_id")
 
-	var exists bool
-	err := h.DB.QueryRow(context.Background(), "SELECT EXISTS(SELECT 1 FROM vendors WHERE id = $1)", vendorID).Scan(&exists)
-	if err != nil || !exists {
+	var vendor models.Vendor
+	if err := h.GormDB.First(&vendor, "id = ?", vendorID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Vendor not found"})
 		return
 	}
@@ -144,60 +148,35 @@ func (h *VendorHandler) PatchVendor(c *gin.Context) {
 		return
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
+	updates := map[string]interface{}{}
 	if req.Name != nil {
-		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argIdx))
-		args = append(args, *req.Name)
-		argIdx++
+		updates["name"] = *req.Name
 	}
 	if req.Category != nil {
-		setClauses = append(setClauses, fmt.Sprintf("category = $%d", argIdx))
-		args = append(args, *req.Category)
-		argIdx++
+		updates["category"] = *req.Category
 	}
 	if req.VendorType != nil {
-		setClauses = append(setClauses, fmt.Sprintf("vendor_type = $%d", argIdx))
-		args = append(args, *req.VendorType)
-		argIdx++
+		updates["vendor_type"] = *req.VendorType
 	}
 	if req.ShopName != nil {
-		setClauses = append(setClauses, fmt.Sprintf("shop_name = $%d", argIdx))
-		args = append(args, *req.ShopName)
-		argIdx++
+		updates["shop_name"] = *req.ShopName
 	}
 	if req.IsPartsVendor != nil {
-		setClauses = append(setClauses, fmt.Sprintf("is_parts_vendor = $%d", argIdx))
-		args = append(args, *req.IsPartsVendor)
-		argIdx++
+		updates["is_parts_vendor"] = *req.IsPartsVendor
 	}
 	if req.IsCogsVendor != nil {
-		setClauses = append(setClauses, fmt.Sprintf("is_cogs_vendor = $%d", argIdx))
-		args = append(args, *req.IsCogsVendor)
-		argIdx++
+		updates["is_cogs_vendor"] = *req.IsCogsVendor
 	}
 	if req.IsStatementVendor != nil {
-		setClauses = append(setClauses, fmt.Sprintf("is_statement_vendor = $%d", argIdx))
-		args = append(args, *req.IsStatementVendor)
-		argIdx++
+		updates["is_statement_vendor"] = *req.IsStatementVendor
 	}
 	if req.GLCodeID != nil {
-		setClauses = append(setClauses, fmt.Sprintf("gl_code_id = $%d", argIdx))
-		args = append(args, *req.GLCodeID)
-		argIdx++
+		updates["gl_code_id"] = *req.GLCodeID
 	}
 
-	if len(setClauses) > 0 {
-		setClauses = append(setClauses, fmt.Sprintf("updated_at = $%d", argIdx))
-		args = append(args, time.Now().UTC())
-		argIdx++
-
-		args = append(args, vendorID)
-		query := fmt.Sprintf("UPDATE vendors SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err = h.DB.Exec(context.Background(), query, args...)
-		if err != nil {
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now().UTC()
+		if err := h.GormDB.Model(&vendor).Updates(updates).Error; err != nil {
 			log.Printf("ERROR: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update vendor", "error": err.Error()})
 			return
@@ -210,13 +189,13 @@ func (h *VendorHandler) PatchVendor(c *gin.Context) {
 func (h *VendorHandler) DeleteVendor(c *gin.Context) {
 	vendorID := c.Param("vendor_id")
 
-	tag, err := h.DB.Exec(context.Background(), "DELETE FROM vendors WHERE id = $1", vendorID)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete vendor", "error": err.Error()})
+	result := h.GormDB.Delete(&models.Vendor{}, "id = ?", vendorID)
+	if result.Error != nil {
+		log.Printf("ERROR: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete vendor", "error": result.Error.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Vendor not found"})
 		return
 	}
@@ -225,30 +204,16 @@ func (h *VendorHandler) DeleteVendor(c *gin.Context) {
 }
 
 func (h *VendorHandler) getVendorByID(c *gin.Context, id string) {
-	var v vendorResponse
-	var glCodeID, gID, gName, gType, gDesc *string
-
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT v.id, v.name, v.category, v.vendor_type, v.shop_name, v.is_parts_vendor, v.is_cogs_vendor, v.is_statement_vendor, v.gl_code_id, v.created_at, v.updated_at,
-		        g.id, g.name, g.account_type, g.description
-		 FROM vendors v
-		 LEFT JOIN chart_of_accounts g ON v.gl_code_id = g.id
-		 WHERE v.id = $1`, id,
-	).Scan(&v.ID, &v.Name, &v.Category, &v.VendorType, &v.ShopName,
-		&v.IsPartsVendor, &v.IsCogsVendor, &v.IsStatementVendor, &glCodeID,
-		&v.CreatedAt, &v.UpdatedAt,
-		&gID, &gName, &gType, &gDesc)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "Vendor not found"})
+	var vendor models.Vendor
+	if err := h.GormDB.Preload("GLCode").First(&vendor, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"detail": "Vendor not found"})
+			return
+		}
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query vendor", "error": err.Error()})
 		return
 	}
 
-	if gID != nil {
-		v.GLCode = gin.H{
-			"id": *gID, "name": gName, "account_type": gType,
-			"description": gDesc,
-		}
-	}
-
-	c.JSON(http.StatusOK, v)
+	c.JSON(http.StatusOK, vendorToResponse(&vendor))
 }

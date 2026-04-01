@@ -1,10 +1,8 @@
 package handlers
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -12,12 +10,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type AuthHandler struct {
-	DB        *pgxpool.Pool
+	GormDB    *gorm.DB
 	SecretKey string
 }
 
@@ -56,13 +56,8 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 		return
 	}
 
-	var userID string
-	var email, passwordHash, role string
-
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT id, email, hashed_password, role FROM users WHERE email = $1",
-		req.Email,
-	).Scan(&userID, &email, &passwordHash, &role)
+	var user models.User
+	err := h.GormDB.Where("email = ?", req.Email).First(&user).Error
 	found := err == nil
 	log.Printf("SignIn: email=%s found=%v err=%v", req.Email, found, err)
 	if err != nil {
@@ -70,16 +65,21 @@ func (h *AuthHandler) SignIn(c *gin.Context) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(req.Password)); err != nil {
 		log.Printf("SignIn: bcrypt compare result: %v", err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
 		return
 	}
 	log.Printf("SignIn: bcrypt compare result: %v", nil)
 
+	role := ""
+	if user.Role != nil {
+		role = *user.Role
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id": userID,
-		"email":   email,
+		"user_id": user.ID,
+		"email":   user.Email,
 		"role":    role,
 		"exp":     time.Now().Add(24 * time.Hour).Unix(),
 	})
@@ -102,18 +102,16 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 	}
 
 	// Check email uniqueness
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
-	if exists {
+	var count int64
+	h.GormDB.Model(&models.User{}).Where("email = ?", req.Email).Count(&count)
+	if count > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Email is already registered"})
 		return
 	}
 
 	// Check mobile_number uniqueness
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE mobile_number = $1)", req.MobileNumber).Scan(&exists)
-	if exists {
+	h.GormDB.Model(&models.User{}).Where("mobile_number = ?", req.MobileNumber).Count(&count)
+	if count > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Mobile number is already registered"})
 		return
 	}
@@ -130,21 +128,26 @@ func (h *AuthHandler) Signup(c *gin.Context) {
 		role = *req.Role
 	}
 
-	id := uuid.New().String()
+	user := models.User{
+		ID:             uuid.New().String(),
+		Email:          req.Email,
+		HashedPassword: string(hashedPassword),
+		FirstName:      &req.FirstName,
+		LastName:       &req.LastName,
+		MobileNumber:   &req.MobileNumber,
+		Role:           &role,
+		IsActive:       true,
+		IsSuperuser:    false,
+	}
 
-	_, err = h.DB.Exec(context.Background(),
-		`INSERT INTO users (id, email, hashed_password, first_name, last_name, mobile_number, role, is_active, is_superuser)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, true, false)`,
-		id, req.Email, string(hashedPassword), req.FirstName, req.LastName, req.MobileNumber, role,
-	)
-	if err != nil {
+	if err := h.GormDB.Create(&user).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create user", "error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":            id,
+		"id":            user.ID,
 		"email":         req.Email,
 		"first_name":    req.FirstName,
 		"last_name":     req.LastName,
@@ -162,31 +165,30 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	var userID, email, passwordHash, role string
-	var isActive bool
-
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT id, email, hashed_password, role, is_active FROM users WHERE email = $1",
-		req.Email,
-	).Scan(&userID, &email, &passwordHash, &role, &isActive)
-	if err != nil {
+	var user models.User
+	if err := h.GormDB.Where("email = ?", req.Email).First(&user).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid credentials"})
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(req.Password)); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid credentials"})
 		return
 	}
 
-	if !isActive {
+	if !user.IsActive {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "User is inactive"})
 		return
 	}
 
+	role := ""
+	if user.Role != nil {
+		role = *user.Role
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id": userID,
-		"email":   email,
+		"user_id": user.ID,
+		"email":   user.Email,
 		"role":    role,
 		"exp":     time.Now().Add(24 * time.Hour).Unix(),
 	})
@@ -201,8 +203,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"access_token": tokenString,
 		"token_type":   "bearer",
-		"user_id":      userID,
-		"email":        email,
+		"user_id":      user.ID,
+		"email":        user.Email,
 		"role":         role,
 	})
 }
@@ -215,31 +217,30 @@ func (h *AuthHandler) LoginDirect(c *gin.Context) {
 		return
 	}
 
-	var userID, email, passwordHash, role string
-	var isActive bool
-
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT id, email, hashed_password, role, is_active FROM users WHERE email = $1",
-		req.Email,
-	).Scan(&userID, &email, &passwordHash, &role, &isActive)
-	if err != nil {
+	var user models.User
+	if err := h.GormDB.Where("email = ?", req.Email).First(&user).Error; err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid credentials"})
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(req.Password)); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Invalid credentials"})
 		return
 	}
 
-	if !isActive {
+	if !user.IsActive {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "User is inactive"})
 		return
 	}
 
+	role := ""
+	if user.Role != nil {
+		role = *user.Role
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id": userID,
-		"email":   email,
+		"user_id": user.ID,
+		"email":   user.Email,
 		"role":    role,
 		"exp":     time.Now().Add(24 * time.Hour).Unix(),
 	})
@@ -254,8 +255,8 @@ func (h *AuthHandler) LoginDirect(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"access_token": tokenString,
 		"token_type":   "bearer",
-		"user_id":      userID,
-		"email":        email,
+		"user_id":      user.ID,
+		"email":        user.Email,
 		"role":         role,
 	})
 }
@@ -273,11 +274,8 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 		email = req.Email
 	}
 
-	var userID, firstName string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT id, first_name FROM users WHERE email = $1", email,
-	).Scan(&userID, &firstName)
-	if err != nil {
+	var user models.User
+	if err := h.GormDB.Where("email = ?", email).First(&user).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
@@ -289,10 +287,10 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 
 	expiry := time.Now().UTC().Add(30 * time.Minute)
 
-	_, err = h.DB.Exec(context.Background(),
-		"UPDATE users SET reset_password_token = $1, reset_password_expiry = $2 WHERE id = $3",
-		resetToken, expiry, userID)
-	if err != nil {
+	if err := h.GormDB.Model(&user).Updates(map[string]interface{}{
+		"reset_password_token":  resetToken,
+		"reset_password_expiry": expiry,
+	}).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to generate reset token", "error": err.Error()})
 		return
@@ -317,12 +315,13 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 		newPassword = req.NewPassword
 	}
 
-	var userID string
-	var expiry *time.Time
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT id, reset_password_expiry FROM users WHERE reset_password_token = $1", token,
-	).Scan(&userID, &expiry)
-	if err != nil || expiry == nil || expiry.Before(time.Now().UTC()) {
+	var user models.User
+	if err := h.GormDB.Where("reset_password_token = ?", token).First(&user).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid or expired token"})
+		return
+	}
+
+	if user.ResetPasswordExpiry == nil || user.ResetPasswordExpiry.Before(time.Now().UTC()) {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid or expired token"})
 		return
 	}
@@ -334,12 +333,13 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 		return
 	}
 
-	_, err = h.DB.Exec(context.Background(),
-		"UPDATE users SET hashed_password = $1, reset_password_token = NULL, reset_password_expiry = NULL WHERE id = $2",
-		string(hashedPassword), userID)
-	if err != nil {
+	if err := h.GormDB.Model(&user).Updates(map[string]interface{}{
+		"hashed_password":       string(hashedPassword),
+		"reset_password_token":  nil,
+		"reset_password_expiry": nil,
+	}).Error; err != nil {
 		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("failed to reset password: %v", err), "error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to reset password", "error": err.Error()})
 		return
 	}
 

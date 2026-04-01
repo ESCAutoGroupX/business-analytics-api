@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type CardHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 type cardCreateRequest struct {
@@ -53,6 +55,37 @@ type cardResponse struct {
 var validCycleTypes = []string{"monthly", "quarterly", "biannual", "yearly", "custom"}
 var validBankProviders = []string{"chase", "amex", "citi", "boa", "wells_fargo", "other"}
 
+func cardToResponse(card *models.Card) cardResponse {
+	cycleType := ""
+	if card.CycleType != nil {
+		cycleType = *card.CycleType
+	}
+	lastFour := ""
+	if card.LastFourDigits != nil {
+		lastFour = *card.LastFourDigits
+	}
+	bankProvider := ""
+	if card.BankProvider != nil {
+		bankProvider = *card.BankProvider
+	}
+	cardIDPlaid := ""
+	if card.CardIDPlaid != nil {
+		cardIDPlaid = *card.CardIDPlaid
+	}
+	return cardResponse{
+		ID:              card.ID,
+		CardName:        card.CardName,
+		CardIDPlaid:     cardIDPlaid,
+		BillingStartDay: card.BillingStartDay,
+		BillingEndDay:   card.BillingEndDay,
+		CycleType:       cycleType,
+		LastFourDigits:  lastFour,
+		BankProvider:    bankProvider,
+		CreatedAt:       &card.CreatedAt,
+		UpdatedAt:       &card.UpdatedAt,
+	}
+}
+
 // POST /cards/
 func (h *CardHandler) CreateCard(c *gin.Context) {
 	var req cardCreateRequest
@@ -74,29 +107,30 @@ func (h *CardHandler) CreateCard(c *gin.Context) {
 	}
 
 	// Check uniqueness of card_id_plaid
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM cards WHERE card_id_plaid = $1)", req.CardIDPlaid).Scan(&exists)
-	if exists {
+	var count int64
+	h.GormDB.Model(&models.Card{}).Where("card_id_plaid = ?", req.CardIDPlaid).Count(&count)
+	if count > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "This card_plaid_id is already associated with another card"})
 		return
 	}
 
-	now := time.Now().UTC()
-	var id int
-	err := h.DB.QueryRow(context.Background(),
-		`INSERT INTO cards (card_name, card_id_plaid, billing_start_day, billing_end_day, cycle_type, last_four_digits, bank_provider, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 RETURNING id`,
-		req.CardName, req.CardIDPlaid, req.BillingStartDay, req.BillingEndDay, cycleType, req.LastFourDigits, bankProvider, now, now,
-	).Scan(&id)
-	if err != nil {
+	card := models.Card{
+		CardName:        req.CardName,
+		CardIDPlaid:     &req.CardIDPlaid,
+		BillingStartDay: req.BillingStartDay,
+		BillingEndDay:   req.BillingEndDay,
+		CycleType:       &cycleType,
+		LastFourDigits:  &req.LastFourDigits,
+		BankProvider:    &bankProvider,
+	}
+
+	if err := h.GormDB.Create(&card).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "An unexpected error occurred while creating the card.", "error": err.Error()})
 		return
 	}
 
-	h.getCardByID(c, id)
+	h.getCardByID(c, card.ID)
 }
 
 // GET /cards/:card_id
@@ -114,29 +148,19 @@ func (h *CardHandler) GetAllCards(c *gin.Context) {
 	skip, _ := strconv.Atoi(c.DefaultQuery("skip", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id, card_name, card_id_plaid, billing_start_day, billing_end_day, cycle_type, last_four_digits, bank_provider, created_at, updated_at
-		 FROM cards OFFSET $1 LIMIT $2`, skip, limit)
-	if err != nil {
+	var cards []models.Card
+	if err := h.GormDB.Offset(skip).Limit(limit).Find(&cards).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query cards", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	cards := []cardResponse{}
-	for rows.Next() {
-		var card cardResponse
-		if err := rows.Scan(&card.ID, &card.CardName, &card.CardIDPlaid, &card.BillingStartDay, &card.BillingEndDay,
-			&card.CycleType, &card.LastFourDigits, &card.BankProvider, &card.CreatedAt, &card.UpdatedAt); err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan card", "error": err.Error()})
-			return
-		}
-		cards = append(cards, card)
+	result := make([]cardResponse, len(cards))
+	for i := range cards {
+		result[i] = cardToResponse(&cards[i])
 	}
 
-	c.JSON(http.StatusOK, cards)
+	c.JSON(http.StatusOK, result)
 }
 
 // PATCH /cards/:card_id
@@ -147,10 +171,8 @@ func (h *CardHandler) UpdateCard(c *gin.Context) {
 		return
 	}
 
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM cards WHERE id = $1)", cardID).Scan(&exists)
-	if !exists {
+	var card models.Card
+	if err := h.GormDB.First(&card, "id = ?", cardID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Card not found"})
 		return
 	}
@@ -161,52 +183,40 @@ func (h *CardHandler) UpdateCard(c *gin.Context) {
 		return
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
+	updates := map[string]interface{}{}
 
 	if req.CardName != nil {
-		addClause("card_name", *req.CardName)
+		updates["card_name"] = *req.CardName
 	}
 	if req.CardIDPlaid != nil {
 		// Check uniqueness
-		var dupExists bool
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM cards WHERE card_id_plaid = $1 AND id != $2)", *req.CardIDPlaid, cardID).Scan(&dupExists)
-		if dupExists {
+		var count int64
+		h.GormDB.Model(&models.Card{}).Where("card_id_plaid = ? AND id != ?", *req.CardIDPlaid, cardID).Count(&count)
+		if count > 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": "A card with this card_id_plaid already exists."})
 			return
 		}
-		addClause("card_id_plaid", *req.CardIDPlaid)
+		updates["card_id_plaid"] = *req.CardIDPlaid
 	}
 	if req.BillingStartDay != nil {
-		addClause("billing_start_day", *req.BillingStartDay)
+		updates["billing_start_day"] = *req.BillingStartDay
 	}
 	if req.BillingEndDay != nil {
-		addClause("billing_end_day", *req.BillingEndDay)
+		updates["billing_end_day"] = *req.BillingEndDay
 	}
 	if req.CycleType != nil {
-		addClause("cycle_type", strings.ToLower(*req.CycleType))
+		updates["cycle_type"] = strings.ToLower(*req.CycleType)
 	}
 	if req.LastFourDigits != nil {
-		addClause("last_four_digits", *req.LastFourDigits)
+		updates["last_four_digits"] = *req.LastFourDigits
 	}
 	if req.BankProvider != nil {
-		addClause("bank_provider", strings.ToLower(*req.BankProvider))
+		updates["bank_provider"] = strings.ToLower(*req.BankProvider)
 	}
 
-	if len(setClauses) > 0 {
-		addClause("updated_at", time.Now().UTC())
-		args = append(args, cardID)
-		query := fmt.Sprintf("UPDATE cards SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err = h.DB.Exec(context.Background(), query, args...)
-		if err != nil {
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now().UTC()
+		if err := h.GormDB.Model(&card).Updates(updates).Error; err != nil {
 			if strings.Contains(err.Error(), "card_id_plaid") {
 				c.JSON(http.StatusBadRequest, gin.H{"detail": "A card with this card_id_plaid already exists."})
 				return
@@ -228,13 +238,13 @@ func (h *CardHandler) DeleteCard(c *gin.Context) {
 		return
 	}
 
-	tag, err := h.DB.Exec(context.Background(), "DELETE FROM cards WHERE id = $1", cardID)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete card", "error": err.Error()})
+	result := h.GormDB.Delete(&models.Card{}, "id = ?", cardID)
+	if result.Error != nil {
+		log.Printf("ERROR: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete card", "error": result.Error.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Card not found"})
 		return
 	}
@@ -244,44 +254,34 @@ func (h *CardHandler) DeleteCard(c *gin.Context) {
 
 // GET /cards/custom-cycle
 func (h *CardHandler) GetCustomCycleCards(c *gin.Context) {
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id, card_name, card_id_plaid, billing_start_day, billing_end_day, cycle_type, last_four_digits, bank_provider, created_at, updated_at
-		 FROM cards WHERE cycle_type = 'custom'`)
-	if err != nil {
+	var cards []models.Card
+	if err := h.GormDB.Where("cycle_type = ?", "custom").Find(&cards).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query cards", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	cards := []cardResponse{}
-	for rows.Next() {
-		var card cardResponse
-		if err := rows.Scan(&card.ID, &card.CardName, &card.CardIDPlaid, &card.BillingStartDay, &card.BillingEndDay,
-			&card.CycleType, &card.LastFourDigits, &card.BankProvider, &card.CreatedAt, &card.UpdatedAt); err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan card", "error": err.Error()})
-			return
-		}
-		cards = append(cards, card)
+	result := make([]cardResponse, len(cards))
+	for i := range cards {
+		result[i] = cardToResponse(&cards[i])
 	}
 
-	c.JSON(http.StatusOK, cards)
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *CardHandler) getCardByID(c *gin.Context, id int) {
-	var card cardResponse
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, card_name, card_id_plaid, billing_start_day, billing_end_day, cycle_type, last_four_digits, bank_provider, created_at, updated_at
-		 FROM cards WHERE id = $1`, id,
-	).Scan(&card.ID, &card.CardName, &card.CardIDPlaid, &card.BillingStartDay, &card.BillingEndDay,
-		&card.CycleType, &card.LastFourDigits, &card.BankProvider, &card.CreatedAt, &card.UpdatedAt)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "Card not found"})
+	var card models.Card
+	if err := h.GormDB.First(&card, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"detail": "Card not found"})
+			return
+		}
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query card", "error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, card)
+	c.JSON(http.StatusOK, cardToResponse(&card))
 }
 
 func contains(slice []string, item string) bool {

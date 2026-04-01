@@ -1,20 +1,20 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type PayrollHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 type payrollCreateRequest struct {
@@ -92,13 +92,49 @@ type adjustmentResponse struct {
 }
 
 func (h *PayrollHandler) getLocationName(locationID int) *string {
-	var name string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT location_name FROM locations WHERE id = $1", locationID).Scan(&name)
-	if err != nil {
+	var loc models.Location
+	if err := h.GormDB.Select("location_name").First(&loc, "id = ?", locationID).Error; err != nil {
 		return nil
 	}
-	return &name
+	return &loc.LocationName
+}
+
+func payrollToResponse(p *models.PayrollEntry, locName *string) payrollResponse {
+	return payrollResponse{
+		ID:           p.ID,
+		Date:         p.Date,
+		EmployeeName: p.EmployeeName,
+		GLCode:       p.GLCode,
+		Description:  p.Description,
+		GrossPay:     p.GrossPay,
+		Taxes:        p.Taxes,
+		NetPay:       p.NetPay,
+		LocationID:   p.LocationID,
+		LocationName: locName,
+		CreatedAt:    &p.CreatedAt,
+		UpdatedAt:    &p.UpdatedAt,
+	}
+}
+
+func adjToResponse(a *models.PayrollAdjustment, locName *string) adjustmentResponse {
+	locID := 0
+	if a.LocationID != nil {
+		locID = *a.LocationID
+	}
+	return adjustmentResponse{
+		ID:           a.ID,
+		Date:         a.Date,
+		GLCode:       a.GLCode,
+		Description:  a.Description,
+		Debit:        a.Debit,
+		Credit:       a.Credit,
+		LocationID:   locID,
+		Notes:        a.Notes,
+		EmployeeName: a.EmployeeName,
+		LocationName: locName,
+		CreatedAt:    &a.CreatedAt,
+		UpdatedAt:    &a.UpdatedAt,
+	}
 }
 
 // POST /payroll/
@@ -110,10 +146,9 @@ func (h *PayrollHandler) CreatePayroll(c *gin.Context) {
 	}
 
 	// Validate location
-	var locExists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM locations WHERE id = $1)", req.LocationID).Scan(&locExists)
-	if !locExists {
+	var count int64
+	h.GormDB.Model(&models.Location{}).Where("id = ?", req.LocationID).Count(&count)
+	if count == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid location ID"})
 		return
 	}
@@ -121,20 +156,25 @@ func (h *PayrollHandler) CreatePayroll(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	uid := fmt.Sprintf("%v", userID)
 
-	var id int
-	err := h.DB.QueryRow(context.Background(),
-		`INSERT INTO payroll (date, employee_name, gl_code, description, gross_pay, taxes, net_pay, location_id, user_id, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-		req.Date, req.EmployeeName, req.GLCode, req.Description, req.GrossPay, req.Taxes, req.NetPay,
-		req.LocationID, uid, time.Now().UTC(), time.Now().UTC(),
-	).Scan(&id)
-	if err != nil {
+	entry := models.PayrollEntry{
+		Date:         req.Date,
+		EmployeeName: req.EmployeeName,
+		GLCode:       req.GLCode,
+		Description:  req.Description,
+		GrossPay:     req.GrossPay,
+		Taxes:        req.Taxes,
+		NetPay:       req.NetPay,
+		LocationID:   req.LocationID,
+		UserID:       &uid,
+	}
+
+	if err := h.GormDB.Create(&entry).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create payroll", "error": err.Error()})
 		return
 	}
 
-	h.getPayrollByID(c, id)
+	h.getPayrollByID(c, entry.ID)
 }
 
 // GET /payroll/
@@ -147,42 +187,24 @@ func (h *PayrollHandler) GetAllPayrolls(c *gin.Context) {
 	role, _ := c.Get("role")
 	roleStr := fmt.Sprintf("%v", role)
 
-	query := `SELECT id, date, employee_name, gl_code, description, gross_pay, taxes, net_pay, location_id, created_at, updated_at
-	           FROM payroll`
-	args := []interface{}{}
-	argIdx := 1
-
+	query := h.GormDB.Model(&models.PayrollEntry{})
 	if roleStr != "Admin" {
-		query += fmt.Sprintf(" WHERE user_id = $%d", argIdx)
-		args = append(args, uid)
-		argIdx++
+		query = query.Where("user_id = ?", uid)
 	}
 
-	query += fmt.Sprintf(" OFFSET $%d LIMIT $%d", argIdx, argIdx+1)
-	args = append(args, skip, limit)
-
-	rows, err := h.DB.Query(context.Background(), query, args...)
-	if err != nil {
+	var entries []models.PayrollEntry
+	if err := query.Offset(skip).Limit(limit).Find(&entries).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payrolls", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	payrolls := []payrollResponse{}
-	for rows.Next() {
-		var p payrollResponse
-		var dateVal time.Time
-		if err := rows.Scan(&p.ID, &dateVal, &p.EmployeeName, &p.GLCode, &p.Description,
-			&p.GrossPay, &p.Taxes, &p.NetPay, &p.LocationID, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			continue
-		}
-		p.Date = dateVal.Format("2006-01-02")
-		p.LocationName = h.getLocationName(p.LocationID)
-		payrolls = append(payrolls, p)
+	result := make([]payrollResponse, len(entries))
+	for i := range entries {
+		result[i] = payrollToResponse(&entries[i], h.getLocationName(entries[i].LocationID))
 	}
 
-	c.JSON(http.StatusOK, payrolls)
+	c.JSON(http.StatusOK, result)
 }
 
 // GET /payroll/:payroll_id
@@ -203,10 +225,8 @@ func (h *PayrollHandler) UpdatePayroll(c *gin.Context) {
 		return
 	}
 
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM payroll WHERE id = $1)", payrollID).Scan(&exists)
-	if !exists {
+	var entry models.PayrollEntry
+	if err := h.GormDB.First(&entry, "id = ?", payrollID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Payroll not found"})
 		return
 	}
@@ -217,7 +237,6 @@ func (h *PayrollHandler) UpdatePayroll(c *gin.Context) {
 		return
 	}
 
-	// Check at least one field
 	if req.Date == nil && req.EmployeeName == nil && req.GLCode == nil && req.Description == nil &&
 		req.GrossPay == nil && req.Taxes == nil && req.NetPay == nil && req.LocationID == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "At least one field must be provided for update"})
@@ -225,55 +244,42 @@ func (h *PayrollHandler) UpdatePayroll(c *gin.Context) {
 	}
 
 	if req.LocationID != nil {
-		var locExists bool
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM locations WHERE id = $1)", *req.LocationID).Scan(&locExists)
-		if !locExists {
+		var count int64
+		h.GormDB.Model(&models.Location{}).Where("id = ?", *req.LocationID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid location ID"})
 			return
 		}
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
-
+	updates := map[string]interface{}{}
 	if req.Date != nil {
-		addClause("date", *req.Date)
+		updates["date"] = *req.Date
 	}
 	if req.EmployeeName != nil {
-		addClause("employee_name", *req.EmployeeName)
+		updates["employee_name"] = *req.EmployeeName
 	}
 	if req.GLCode != nil {
-		addClause("gl_code", *req.GLCode)
+		updates["gl_code"] = *req.GLCode
 	}
 	if req.Description != nil {
-		addClause("description", *req.Description)
+		updates["description"] = *req.Description
 	}
 	if req.GrossPay != nil {
-		addClause("gross_pay", *req.GrossPay)
+		updates["gross_pay"] = *req.GrossPay
 	}
 	if req.Taxes != nil {
-		addClause("taxes", *req.Taxes)
+		updates["taxes"] = *req.Taxes
 	}
 	if req.NetPay != nil {
-		addClause("net_pay", *req.NetPay)
+		updates["net_pay"] = *req.NetPay
 	}
 	if req.LocationID != nil {
-		addClause("location_id", *req.LocationID)
+		updates["location_id"] = *req.LocationID
 	}
 
-	addClause("updated_at", time.Now().UTC())
-	args = append(args, payrollID)
-	query := fmt.Sprintf("UPDATE payroll SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-	_, err = h.DB.Exec(context.Background(), query, args...)
-	if err != nil {
+	updates["updated_at"] = time.Now().UTC()
+	if err := h.GormDB.Model(&entry).Updates(updates).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update payroll", "error": err.Error()})
 		return
@@ -295,21 +301,18 @@ func (h *PayrollHandler) DeletePayroll(c *gin.Context) {
 	role, _ := c.Get("role")
 	roleStr := fmt.Sprintf("%v", role)
 
-	// Check existence and ownership
-	var payrollUserID *string
-	err = h.DB.QueryRow(context.Background(),
-		"SELECT user_id FROM payroll WHERE id = $1", payrollID).Scan(&payrollUserID)
-	if err != nil {
+	var entry models.PayrollEntry
+	if err := h.GormDB.First(&entry, "id = ?", payrollID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Payroll not found"})
 		return
 	}
 
-	if roleStr != "Admin" && (payrollUserID == nil || *payrollUserID != uid) {
+	if roleStr != "Admin" && (entry.UserID == nil || *entry.UserID != uid) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You do not have permission to delete this payroll entry"})
 		return
 	}
 
-	h.DB.Exec(context.Background(), "DELETE FROM payroll WHERE id = $1", payrollID)
+	h.GormDB.Delete(&entry)
 	c.JSON(http.StatusOK, gin.H{"message": "Payroll deleted successfully!"})
 }
 
@@ -321,10 +324,9 @@ func (h *PayrollHandler) CreateAdjustment(c *gin.Context) {
 		return
 	}
 
-	var locExists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM locations WHERE id = $1)", req.LocationID).Scan(&locExists)
-	if !locExists {
+	var count int64
+	h.GormDB.Model(&models.Location{}).Where("id = ?", req.LocationID).Count(&count)
+	if count == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid location ID"})
 		return
 	}
@@ -332,20 +334,25 @@ func (h *PayrollHandler) CreateAdjustment(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	uid := fmt.Sprintf("%v", userID)
 
-	var id int
-	err := h.DB.QueryRow(context.Background(),
-		`INSERT INTO payroll_account_adjustments (date, gl_code, description, debit, credit, location_id, user_id, notes, employee_name, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-		req.Date, req.GLCode, req.Description, req.Debit, req.Credit, req.LocationID,
-		uid, req.Notes, req.EmployeeName, time.Now().UTC(), time.Now().UTC(),
-	).Scan(&id)
-	if err != nil {
+	adj := models.PayrollAdjustment{
+		Date:         req.Date,
+		GLCode:       req.GLCode,
+		Description:  req.Description,
+		Debit:        req.Debit,
+		Credit:       req.Credit,
+		LocationID:   &req.LocationID,
+		UserID:       &uid,
+		Notes:        req.Notes,
+		EmployeeName: req.EmployeeName,
+	}
+
+	if err := h.GormDB.Create(&adj).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create adjustment", "error": err.Error()})
 		return
 	}
 
-	h.getAdjustmentByID(c, id)
+	h.getAdjustmentByID(c, adj.ID)
 }
 
 // GET /payroll/adjustments
@@ -358,42 +365,28 @@ func (h *PayrollHandler) ListAdjustments(c *gin.Context) {
 	role, _ := c.Get("role")
 	roleStr := fmt.Sprintf("%v", role)
 
-	query := `SELECT id, date, gl_code, description, debit, credit, location_id, notes, employee_name, created_at, updated_at
-	           FROM payroll_account_adjustments`
-	args := []interface{}{}
-	argIdx := 1
-
+	query := h.GormDB.Model(&models.PayrollAdjustment{})
 	if roleStr != "Admin" {
-		query += fmt.Sprintf(" WHERE user_id = $%d", argIdx)
-		args = append(args, uid)
-		argIdx++
+		query = query.Where("user_id = ?", uid)
 	}
 
-	query += fmt.Sprintf(" OFFSET $%d LIMIT $%d", argIdx, argIdx+1)
-	args = append(args, skip, limit)
-
-	rows, err := h.DB.Query(context.Background(), query, args...)
-	if err != nil {
+	var adjustments []models.PayrollAdjustment
+	if err := query.Offset(skip).Limit(limit).Find(&adjustments).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query adjustments", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	adjustments := []adjustmentResponse{}
-	for rows.Next() {
-		var a adjustmentResponse
-		var dateVal time.Time
-		if err := rows.Scan(&a.ID, &dateVal, &a.GLCode, &a.Description, &a.Debit, &a.Credit,
-			&a.LocationID, &a.Notes, &a.EmployeeName, &a.CreatedAt, &a.UpdatedAt); err != nil {
-			continue
+	result := make([]adjustmentResponse, len(adjustments))
+	for i := range adjustments {
+		locID := 0
+		if adjustments[i].LocationID != nil {
+			locID = *adjustments[i].LocationID
 		}
-		a.Date = dateVal.Format("2006-01-02")
-		a.LocationName = h.getLocationName(a.LocationID)
-		adjustments = append(adjustments, a)
+		result[i] = adjToResponse(&adjustments[i], h.getLocationName(locID))
 	}
 
-	c.JSON(http.StatusOK, adjustments)
+	c.JSON(http.StatusOK, result)
 }
 
 // GET /payroll/adjustments/:adjustment_id
@@ -414,10 +407,8 @@ func (h *PayrollHandler) UpdateAdjustment(c *gin.Context) {
 		return
 	}
 
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM payroll_account_adjustments WHERE id = $1)", adjustmentID).Scan(&exists)
-	if !exists {
+	var adj models.PayrollAdjustment
+	if err := h.GormDB.First(&adj, "id = ?", adjustmentID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "PayrollAccountAdjustment not found"})
 		return
 	}
@@ -435,55 +426,42 @@ func (h *PayrollHandler) UpdateAdjustment(c *gin.Context) {
 	}
 
 	if req.LocationID != nil {
-		var locExists bool
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM locations WHERE id = $1)", *req.LocationID).Scan(&locExists)
-		if !locExists {
+		var count int64
+		h.GormDB.Model(&models.Location{}).Where("id = ?", *req.LocationID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid location ID"})
 			return
 		}
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
-
+	updates := map[string]interface{}{}
 	if req.Date != nil {
-		addClause("date", *req.Date)
+		updates["date"] = *req.Date
 	}
 	if req.GLCode != nil {
-		addClause("gl_code", *req.GLCode)
+		updates["gl_code"] = *req.GLCode
 	}
 	if req.Description != nil {
-		addClause("description", *req.Description)
+		updates["description"] = *req.Description
 	}
 	if req.Debit != nil {
-		addClause("debit", *req.Debit)
+		updates["debit"] = *req.Debit
 	}
 	if req.Credit != nil {
-		addClause("credit", *req.Credit)
+		updates["credit"] = *req.Credit
 	}
 	if req.Notes != nil {
-		addClause("notes", *req.Notes)
+		updates["notes"] = *req.Notes
 	}
 	if req.EmployeeName != nil {
-		addClause("employee_name", *req.EmployeeName)
+		updates["employee_name"] = *req.EmployeeName
 	}
 	if req.LocationID != nil {
-		addClause("location_id", *req.LocationID)
+		updates["location_id"] = *req.LocationID
 	}
 
-	addClause("updated_at", time.Now().UTC())
-	args = append(args, adjustmentID)
-	query := fmt.Sprintf("UPDATE payroll_account_adjustments SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-	_, err = h.DB.Exec(context.Background(), query, args...)
-	if err != nil {
+	updates["updated_at"] = time.Now().UTC()
+	if err := h.GormDB.Model(&adj).Updates(updates).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update adjustment", "error": err.Error()})
 		return
@@ -505,55 +483,41 @@ func (h *PayrollHandler) DeleteAdjustment(c *gin.Context) {
 	role, _ := c.Get("role")
 	roleStr := fmt.Sprintf("%v", role)
 
-	var adjUserID *string
-	err = h.DB.QueryRow(context.Background(),
-		"SELECT user_id FROM payroll_account_adjustments WHERE id = $1", adjustmentID).Scan(&adjUserID)
-	if err != nil {
+	var adj models.PayrollAdjustment
+	if err := h.GormDB.First(&adj, "id = ?", adjustmentID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "PayrollAccountAdjustment not found"})
 		return
 	}
 
-	if roleStr != "Admin" && (adjUserID == nil || *adjUserID != uid) {
+	if roleStr != "Admin" && (adj.UserID == nil || *adj.UserID != uid) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You do not have permission to delete this payroll adjustment"})
 		return
 	}
 
-	h.DB.Exec(context.Background(), "DELETE FROM payroll_account_adjustments WHERE id = $1", adjustmentID)
+	h.GormDB.Delete(&adj)
 	c.JSON(http.StatusOK, gin.H{"message": "Payroll adjustment deleted successfully!"})
 }
 
 func (h *PayrollHandler) getPayrollByID(c *gin.Context, id int) {
-	var p payrollResponse
-	var dateVal time.Time
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, date, employee_name, gl_code, description, gross_pay, taxes, net_pay, location_id, created_at, updated_at
-		 FROM payroll WHERE id = $1`, id,
-	).Scan(&p.ID, &dateVal, &p.EmployeeName, &p.GLCode, &p.Description,
-		&p.GrossPay, &p.Taxes, &p.NetPay, &p.LocationID, &p.CreatedAt, &p.UpdatedAt)
-	if err != nil {
+	var entry models.PayrollEntry
+	if err := h.GormDB.First(&entry, "id = ?", id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Payroll not found"})
 		return
 	}
-	p.Date = dateVal.Format("2006-01-02")
-	p.LocationName = h.getLocationName(p.LocationID)
 
-	c.JSON(http.StatusOK, p)
+	c.JSON(http.StatusOK, payrollToResponse(&entry, h.getLocationName(entry.LocationID)))
 }
 
 func (h *PayrollHandler) getAdjustmentByID(c *gin.Context, id int) {
-	var a adjustmentResponse
-	var dateVal time.Time
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, date, gl_code, description, debit, credit, location_id, notes, employee_name, created_at, updated_at
-		 FROM payroll_account_adjustments WHERE id = $1`, id,
-	).Scan(&a.ID, &dateVal, &a.GLCode, &a.Description, &a.Debit, &a.Credit,
-		&a.LocationID, &a.Notes, &a.EmployeeName, &a.CreatedAt, &a.UpdatedAt)
-	if err != nil {
+	var adj models.PayrollAdjustment
+	if err := h.GormDB.First(&adj, "id = ?", id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "PayrollAccountAdjustment not found"})
 		return
 	}
-	a.Date = dateVal.Format("2006-01-02")
-	a.LocationName = h.getLocationName(a.LocationID)
 
-	c.JSON(http.StatusOK, a)
+	locID := 0
+	if adj.LocationID != nil {
+		locID = *adj.LocationID
+	}
+	c.JSON(http.StatusOK, adjToResponse(&adj, h.getLocationName(locID)))
 }

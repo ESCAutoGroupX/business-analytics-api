@@ -14,14 +14,21 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"database/sql"
+
+	"gorm.io/gorm"
 
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 )
 
 type TekmetricHandler struct {
-	DB  *pgxpool.Pool
-	Cfg *config.Config
+	GormDB *gorm.DB
+	Cfg    *config.Config
+}
+
+func (h *TekmetricHandler) sqlDB() *sql.DB {
+	db, _ := h.GormDB.DB()
+	return db
 }
 
 // ---------------------------------------------------------------
@@ -274,7 +281,7 @@ func (h *TekmetricHandler) GetRepairOrders(c *gin.Context) {
 	// Count total
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM tekmetric_repair_orders ro %s", where)
 	var totalCount int
-	h.DB.QueryRow(context.Background(), countQuery, args...).Scan(&totalCount)
+	h.sqlDB().QueryRowContext(context.Background(), countQuery, args...).Scan(&totalCount)
 
 	totalPages := 0
 	if size > 0 {
@@ -295,7 +302,7 @@ func (h *TekmetricHandler) GetRepairOrders(c *gin.Context) {
 		where, sortCol, order, argIdx, argIdx+1)
 	args = append(args, offset, size)
 
-	rows, err := h.DB.Query(context.Background(), dataQuery, args...)
+	rows, err := h.sqlDB().QueryContext(context.Background(), dataQuery, args...)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("query error: %v", err), "error": err.Error()})
@@ -329,8 +336,7 @@ func (h *TekmetricHandler) GetRepairOrders(c *gin.Context) {
 func (h *TekmetricHandler) GetRepairOrderByID(c *gin.Context) {
 	roID := c.Param("repair_order_id")
 
-	row := h.DB.QueryRow(context.Background(),
-		`SELECT id, ro_number, shop_id, customer_id, vehicle_id,
+	row := h.sqlDB().QueryRowContext(context.Background(), `SELECT id, ro_number, shop_id, customer_id, vehicle_id,
 		 labor_sales, parts_sales, sublet_sales, discount_total, fee_total,
 		 taxes, amount_paid, total_sales,
 		 posted_date, completed_date, created_date, updated_date,
@@ -355,8 +361,7 @@ func (h *TekmetricHandler) PatchRepairOrder(c *gin.Context) {
 	roID := c.Param("repair_order_id")
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM tekmetric_repair_orders WHERE id = $1)", roID).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM tekmetric_repair_orders WHERE id = $1)", roID).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Repair order not found"})
 		return
@@ -399,12 +404,11 @@ func (h *TekmetricHandler) PatchRepairOrder(c *gin.Context) {
 		args = append(args, roID)
 		query := fmt.Sprintf("UPDATE tekmetric_repair_orders SET %s WHERE id = $%d",
 			strings.Join(setClauses, ", "), argIdx)
-		h.DB.Exec(context.Background(), query, args...)
+		h.sqlDB().ExecContext(context.Background(), query, args...)
 	}
 
 	// Return updated
-	row := h.DB.QueryRow(context.Background(),
-		`SELECT id, ro_number, shop_id, customer_id, vehicle_id,
+	row := h.sqlDB().QueryRowContext(context.Background(), `SELECT id, ro_number, shop_id, customer_id, vehicle_id,
 		 labor_sales, parts_sales, sublet_sales, discount_total, fee_total,
 		 taxes, amount_paid, total_sales,
 		 posted_date, completed_date, created_date, updated_date,
@@ -446,8 +450,7 @@ func (h *TekmetricHandler) BulkPatchRepairOrders(c *gin.Context) {
 
 	for _, item := range req.Updates {
 		var exists bool
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM tekmetric_repair_orders WHERE id = $1)", item.RepairOrderID).Scan(&exists)
+		h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM tekmetric_repair_orders WHERE id = $1)", item.RepairOrderID).Scan(&exists)
 		if !exists {
 			c.JSON(http.StatusNotFound, gin.H{"detail": fmt.Sprintf("Repair order %s not found", item.RepairOrderID)})
 			return
@@ -474,7 +477,7 @@ func (h *TekmetricHandler) BulkPatchRepairOrders(c *gin.Context) {
 			args = append(args, item.RepairOrderID)
 			query := fmt.Sprintf("UPDATE tekmetric_repair_orders SET %s WHERE id = $%d",
 				strings.Join(setClauses, ", "), argIdx)
-			h.DB.Exec(context.Background(), query, args...)
+			h.sqlDB().ExecContext(context.Background(), query, args...)
 		}
 
 		updatedIDs = append(updatedIDs, item.RepairOrderID)
@@ -483,8 +486,7 @@ func (h *TekmetricHandler) BulkPatchRepairOrders(c *gin.Context) {
 	// Return updated records
 	results := []map[string]interface{}{}
 	for _, id := range updatedIDs {
-		row := h.DB.QueryRow(context.Background(),
-			`SELECT id, ro_number, shop_id, customer_id, vehicle_id,
+		row := h.sqlDB().QueryRowContext(context.Background(), `SELECT id, ro_number, shop_id, customer_id, vehicle_id,
 			 labor_sales, parts_sales, sublet_sales, discount_total, fee_total,
 			 taxes, amount_paid, total_sales,
 			 posted_date, completed_date, created_date, updated_date,
@@ -506,8 +508,7 @@ func (h *TekmetricHandler) BulkPatchRepairOrders(c *gin.Context) {
 
 func (h *TekmetricHandler) GetAllCustomersParallel(c *gin.Context) {
 	// Get distinct customer_ids and vehicle_ids from repair orders
-	custRows, err := h.DB.Query(context.Background(),
-		"SELECT DISTINCT customer_id FROM tekmetric_repair_orders WHERE customer_id IS NOT NULL")
+	custRows, err := h.sqlDB().QueryContext(context.Background(), "SELECT DISTINCT customer_id FROM tekmetric_repair_orders WHERE customer_id IS NOT NULL")
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error(), "error": err.Error()})
@@ -522,8 +523,7 @@ func (h *TekmetricHandler) GetAllCustomersParallel(c *gin.Context) {
 	}
 	custRows.Close()
 
-	vehRows, err := h.DB.Query(context.Background(),
-		"SELECT DISTINCT vehicle_id FROM tekmetric_repair_orders WHERE vehicle_id IS NOT NULL")
+	vehRows, err := h.sqlDB().QueryContext(context.Background(), "SELECT DISTINCT vehicle_id FROM tekmetric_repair_orders WHERE vehicle_id IS NOT NULL")
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error(), "error": err.Error()})
@@ -585,17 +585,14 @@ func (h *TekmetricHandler) saveCustomerToDB(data map[string]interface{}) {
 	updatedDate, _ := data["updatedDate"].(string)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM tekmetric_customers WHERE id = $1)", id).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM tekmetric_customers WHERE id = $1)", id).Scan(&exists)
 
 	if exists {
-		h.DB.Exec(context.Background(),
-			`UPDATE tekmetric_customers SET first_name=$1, last_name=$2, email=$3, phone=$4, address=$5,
+		h.sqlDB().ExecContext(context.Background(), `UPDATE tekmetric_customers SET first_name=$1, last_name=$2, email=$3, phone=$4, address=$5,
 			 notes=$6, customer_type=$7, created_date=$8, updated_date=$9 WHERE id=$10`,
 			firstName, lastName, email, phone, address, notes, customerType, createdDate, updatedDate, id)
 	} else {
-		h.DB.Exec(context.Background(),
-			`INSERT INTO tekmetric_customers (id, first_name, last_name, email, phone, address, notes, customer_type, created_date, updated_date)
+		h.sqlDB().ExecContext(context.Background(), `INSERT INTO tekmetric_customers (id, first_name, last_name, email, phone, address, notes, customer_type, created_date, updated_date)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 			id, firstName, lastName, email, phone, address, notes, customerType, createdDate, updatedDate)
 	}
@@ -608,20 +605,17 @@ func (h *TekmetricHandler) saveVehicleToDB(data map[string]interface{}) {
 	// Check customer exists
 	if customerID != nil {
 		var custExists bool
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM tekmetric_customers WHERE id = $1)", customerID).Scan(&custExists)
+		h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM tekmetric_customers WHERE id = $1)", customerID).Scan(&custExists)
 		if !custExists {
 			return
 		}
 	}
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM tekmetric_vehicles WHERE id = $1)", id).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM tekmetric_vehicles WHERE id = $1)", id).Scan(&exists)
 
 	if exists {
-		h.DB.Exec(context.Background(),
-			`UPDATE tekmetric_vehicles SET customer_id=$1, year=$2, make=$3, model=$4, sub_model=$5,
+		h.sqlDB().ExecContext(context.Background(), `UPDATE tekmetric_vehicles SET customer_id=$1, year=$2, make=$3, model=$4, sub_model=$5,
 			 engine=$6, color=$7, license_plate=$8, state=$9, vin=$10, drive_type=$11,
 			 transmission=$12, body_type=$13, notes=$14, unit_number=$15, created_date=$16,
 			 updated_date=$17, production_date=$18, deleted_date=$19 WHERE id=$20`,
@@ -631,8 +625,7 @@ func (h *TekmetricHandler) saveVehicleToDB(data map[string]interface{}) {
 			data["unitNumber"], data["createdDate"], data["updatedDate"],
 			data["productionDate"], data["deletedDate"], id)
 	} else {
-		h.DB.Exec(context.Background(),
-			`INSERT INTO tekmetric_vehicles (id, customer_id, year, make, model, sub_model,
+		h.sqlDB().ExecContext(context.Background(), `INSERT INTO tekmetric_vehicles (id, customer_id, year, make, model, sub_model,
 			 engine, color, license_plate, state, vin, drive_type, transmission, body_type,
 			 notes, unit_number, created_date, updated_date, production_date, deleted_date)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,

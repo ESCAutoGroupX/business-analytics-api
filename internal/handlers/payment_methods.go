@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,89 +10,91 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type PaymentMethodHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 type paymentMethodCreateRequest struct {
-	PlaidAccountID       *string  `json:"plaid_account_id"`
-	Title                *string  `json:"title"`
-	Description          *string  `json:"description"`
-	MethodType           string   `json:"method_type" binding:"required"`
-	ChequeSeriesStart    *string  `json:"cheque_series_start"`
-	ChequeSeriesEnd      *string  `json:"cheque_series_end"`
-	BankName             *string  `json:"bank_name"`
-	BankAccountNumber    *string  `json:"bank_account_number"`
-	BankRoutingNumber    *string  `json:"bank_routing_number"`
-	CardLast4Digits      *string  `json:"card_last_4_digits"`
-	CardName             *string  `json:"card_name"`
-	Subtype              *string  `json:"subtype"`
-	HolderCategory       *string  `json:"holder_category"`
-	BalanceAvailable     *float64 `json:"balance_available"`
-	BalanceCurrent       *float64 `json:"balance_current"`
-	CreditLimit          *float64 `json:"credit_limit"`
-	IsoCurrencyCode      *string  `json:"iso_currency_code"`
-	UnofficialCurrencyCode *string `json:"unofficial_currency_code"`
-	MinimumBalance       *float64 `json:"minimum_balance"`
-	StartingCreditCardBal *float64 `json:"starting_credit_card_bal"`
-	SortingOrder         *int     `json:"sorting_order"`
-	LocationID           *string  `json:"location_id"`
+	PlaidAccountID         *string  `json:"plaid_account_id"`
+	Title                  *string  `json:"title"`
+	Description            *string  `json:"description"`
+	MethodType             string   `json:"method_type" binding:"required"`
+	ChequeSeriesStart      *string  `json:"cheque_series_start"`
+	ChequeSeriesEnd        *string  `json:"cheque_series_end"`
+	BankName               *string  `json:"bank_name"`
+	BankAccountNumber      *string  `json:"bank_account_number"`
+	BankRoutingNumber      *string  `json:"bank_routing_number"`
+	CardLast4Digits        *string  `json:"card_last_4_digits"`
+	CardName               *string  `json:"card_name"`
+	Subtype                *string  `json:"subtype"`
+	HolderCategory         *string  `json:"holder_category"`
+	BalanceAvailable       *float64 `json:"balance_available"`
+	BalanceCurrent         *float64 `json:"balance_current"`
+	CreditLimit            *float64 `json:"credit_limit"`
+	IsoCurrencyCode        *string  `json:"iso_currency_code"`
+	UnofficialCurrencyCode *string  `json:"unofficial_currency_code"`
+	MinimumBalance         *float64 `json:"minimum_balance"`
+	StartingCreditCardBal  *float64 `json:"starting_credit_card_bal"`
+	SortingOrder           *int     `json:"sorting_order"`
+	LocationID             *string  `json:"location_id"`
 }
 
 type paymentMethodUpdateRequest struct {
-	Title                *string  `json:"title"`
-	Description          *string  `json:"description"`
-	MethodType           *string  `json:"method_type"`
-	ChequeSeriesStart    *string  `json:"cheque_series_start"`
-	ChequeSeriesEnd      *string  `json:"cheque_series_end"`
-	BankName             *string  `json:"bank_name"`
-	BankAccountNumber    *string  `json:"bank_account_number"`
-	BankRoutingNumber    *string  `json:"bank_routing_number"`
-	CardLast4Digits      *string  `json:"card_last_4_digits"`
-	CardName             *string  `json:"card_name"`
-	Subtype              *string  `json:"subtype"`
-	HolderCategory       *string  `json:"holder_category"`
-	BalanceAvailable     *float64 `json:"balance_available"`
-	BalanceCurrent       *float64 `json:"balance_current"`
-	CreditLimit          *float64 `json:"credit_limit"`
-	IsoCurrencyCode      *string  `json:"iso_currency_code"`
-	UnofficialCurrencyCode *string `json:"unofficial_currency_code"`
-	MinimumBalance       *float64 `json:"minimum_balance"`
-	StartingCreditCardBal *float64 `json:"starting_credit_card_bal"`
-	SortingOrder         *int     `json:"sorting_order"`
-	LocationID           *string  `json:"location_id"`
+	Title                  *string  `json:"title"`
+	Description            *string  `json:"description"`
+	MethodType             *string  `json:"method_type"`
+	ChequeSeriesStart      *string  `json:"cheque_series_start"`
+	ChequeSeriesEnd        *string  `json:"cheque_series_end"`
+	BankName               *string  `json:"bank_name"`
+	BankAccountNumber      *string  `json:"bank_account_number"`
+	BankRoutingNumber      *string  `json:"bank_routing_number"`
+	CardLast4Digits        *string  `json:"card_last_4_digits"`
+	CardName               *string  `json:"card_name"`
+	Subtype                *string  `json:"subtype"`
+	HolderCategory         *string  `json:"holder_category"`
+	BalanceAvailable       *float64 `json:"balance_available"`
+	BalanceCurrent         *float64 `json:"balance_current"`
+	CreditLimit            *float64 `json:"credit_limit"`
+	IsoCurrencyCode        *string  `json:"iso_currency_code"`
+	UnofficialCurrencyCode *string  `json:"unofficial_currency_code"`
+	MinimumBalance         *float64 `json:"minimum_balance"`
+	StartingCreditCardBal  *float64 `json:"starting_credit_card_bal"`
+	SortingOrder           *int     `json:"sorting_order"`
+	LocationID             *string  `json:"location_id"`
 }
 
 type paymentMethodResponse struct {
-	ID                    string     `json:"id"`
-	PlaidAccountID        *string    `json:"plaid_account_id"`
-	Title                 *string    `json:"title"`
-	Description           *string    `json:"description"`
-	MethodType            *string    `json:"method_type"`
-	ChequeSeriesStart     *string    `json:"cheque_series_start"`
-	ChequeSeriesEnd       *string    `json:"cheque_series_end"`
-	BankName              *string    `json:"bank_name"`
-	BankAccountNumber     *string    `json:"bank_account_number"`
-	BankRoutingNumber     *string    `json:"bank_routing_number"`
-	CardLast4Digits       *string    `json:"card_last_4_digits"`
-	CardName              *string    `json:"card_name"`
-	Subtype               *string    `json:"subtype"`
-	HolderCategory        *string    `json:"holder_category"`
-	BalanceAvailable      *float64   `json:"balance_available"`
-	BalanceCurrent        *float64   `json:"balance_current"`
-	CreditLimit           *float64   `json:"credit_limit"`
-	IsoCurrencyCode       *string    `json:"iso_currency_code"`
-	UnofficialCurrencyCode *string   `json:"unofficial_currency_code"`
-	TotalAmount           *float64   `json:"total_amount"`
-	MinimumBalance        *float64   `json:"minimum_balance"`
-	StartingCreditCardBal *float64   `json:"starting_credit_card_bal"`
-	SortingOrder          *int       `json:"sorting_order"`
-	LocationID            *string    `json:"location_id"`
-	CreatedAt             *time.Time `json:"created_at"`
-	UpdatedAt             *time.Time `json:"updated_at"`
+	ID                     string     `json:"id"`
+	PlaidAccountID         *string    `json:"plaid_account_id"`
+	Title                  *string    `json:"title"`
+	Description            *string    `json:"description"`
+	MethodType             *string    `json:"method_type"`
+	ChequeSeriesStart      *string    `json:"cheque_series_start"`
+	ChequeSeriesEnd        *string    `json:"cheque_series_end"`
+	BankName               *string    `json:"bank_name"`
+	BankAccountNumber      *string    `json:"bank_account_number"`
+	BankRoutingNumber      *string    `json:"bank_routing_number"`
+	CardLast4Digits        *string    `json:"card_last_4_digits"`
+	CardName               *string    `json:"card_name"`
+	Subtype                *string    `json:"subtype"`
+	HolderCategory         *string    `json:"holder_category"`
+	BalanceAvailable       *float64   `json:"balance_available"`
+	BalanceCurrent         *float64   `json:"balance_current"`
+	CreditLimit            *float64   `json:"credit_limit"`
+	IsoCurrencyCode        *string    `json:"iso_currency_code"`
+	UnofficialCurrencyCode *string    `json:"unofficial_currency_code"`
+	TotalAmount            *float64   `json:"total_amount"`
+	MinimumBalance         *float64   `json:"minimum_balance"`
+	StartingCreditCardBal  *float64   `json:"starting_credit_card_bal"`
+	SortingOrder           *int       `json:"sorting_order"`
+	LocationID             *string    `json:"location_id"`
+	CreatedAt              *time.Time `json:"created_at"`
+	UpdatedAt              *time.Time `json:"updated_at"`
 }
 
 var validPaymentMethodTypes = []string{"CASH", "CREDIT_CARD", "CHECK", "DEPOSITORY", "LOAN", "BROKERAGE", "INVESTMENT"}
@@ -104,6 +106,37 @@ func isValidPaymentMethodType(t string) bool {
 		}
 	}
 	return false
+}
+
+func pmToResponse(pm *models.PaymentMethod) paymentMethodResponse {
+	return paymentMethodResponse{
+		ID:                     pm.ID,
+		PlaidAccountID:         pm.PlaidAccountID,
+		Title:                  pm.Title,
+		Description:            pm.Description,
+		MethodType:             &pm.MethodType,
+		ChequeSeriesStart:      pm.ChequeSeriesStart,
+		ChequeSeriesEnd:        pm.ChequeSeriesEnd,
+		BankName:               pm.BankName,
+		BankAccountNumber:      pm.BankAccountNumber,
+		BankRoutingNumber:      pm.BankRoutingNumber,
+		CardLast4Digits:        pm.CardLast4Digits,
+		CardName:               pm.CardName,
+		Subtype:                pm.Subtype,
+		HolderCategory:         pm.HolderCategory,
+		BalanceAvailable:       pm.BalanceAvailable,
+		BalanceCurrent:         pm.BalanceCurrent,
+		CreditLimit:            pm.CreditLimit,
+		IsoCurrencyCode:        pm.IsoCurrencyCode,
+		UnofficialCurrencyCode: pm.UnofficialCurrencyCode,
+		TotalAmount:            pm.TotalAmount,
+		MinimumBalance:         pm.MinimumBalance,
+		StartingCreditCardBal:  pm.StartingCreditCardBal,
+		SortingOrder:           pm.SortingOrder,
+		LocationID:             pm.LocationID,
+		CreatedAt:              &pm.CreatedAt,
+		UpdatedAt:              &pm.UpdatedAt,
+	}
 }
 
 func (h *PaymentMethodHandler) requireAdmin(c *gin.Context) bool {
@@ -152,63 +185,56 @@ func (h *PaymentMethodHandler) CreatePaymentMethod(c *gin.Context) {
 		req.CardName = nil
 	}
 
-	id := uuid.New().String()
-	now := time.Now().UTC()
+	pm := models.PaymentMethod{
+		ID:                     uuid.New().String(),
+		PlaidAccountID:         req.PlaidAccountID,
+		Title:                  req.Title,
+		Description:            req.Description,
+		MethodType:             methodType,
+		ChequeSeriesStart:      req.ChequeSeriesStart,
+		ChequeSeriesEnd:        req.ChequeSeriesEnd,
+		BankName:               req.BankName,
+		BankAccountNumber:      req.BankAccountNumber,
+		BankRoutingNumber:      req.BankRoutingNumber,
+		CardLast4Digits:        req.CardLast4Digits,
+		CardName:               req.CardName,
+		Subtype:                req.Subtype,
+		HolderCategory:         req.HolderCategory,
+		BalanceAvailable:       req.BalanceAvailable,
+		BalanceCurrent:         req.BalanceCurrent,
+		CreditLimit:            req.CreditLimit,
+		IsoCurrencyCode:        req.IsoCurrencyCode,
+		UnofficialCurrencyCode: req.UnofficialCurrencyCode,
+		MinimumBalance:         req.MinimumBalance,
+		StartingCreditCardBal:  req.StartingCreditCardBal,
+		SortingOrder:           req.SortingOrder,
+		LocationID:             req.LocationID,
+	}
 
-	_, err := h.DB.Exec(context.Background(),
-		`INSERT INTO payment_methods (id, plaid_account_id, title, description, method_type,
-		 cheque_series_start, cheque_series_end, bank_name, bank_account_number, bank_routing_number,
-		 card_last_4_digits, card_name, subtype, holder_category, balance_available, balance_current,
-		 credit_limit, iso_currency_code, unofficial_currency_code, minimum_balance,
-		 starting_credit_card_bal, sorting_order, location_id, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
-		id, req.PlaidAccountID, req.Title, req.Description, methodType,
-		req.ChequeSeriesStart, req.ChequeSeriesEnd, req.BankName, req.BankAccountNumber, req.BankRoutingNumber,
-		req.CardLast4Digits, req.CardName, req.Subtype, req.HolderCategory, req.BalanceAvailable, req.BalanceCurrent,
-		req.CreditLimit, req.IsoCurrencyCode, req.UnofficialCurrencyCode, req.MinimumBalance,
-		req.StartingCreditCardBal, req.SortingOrder, req.LocationID, now, now,
-	)
-	if err != nil {
+	if err := h.GormDB.Create(&pm).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create payment method", "error": err.Error()})
 		return
 	}
 
-	h.getPaymentMethodByID(c, id)
+	h.getPaymentMethodByID(c, pm.ID)
 }
 
 // GET /payment-methods/
 func (h *PaymentMethodHandler) ListPaymentMethods(c *gin.Context) {
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id, plaid_account_id, title, description, method_type,
-		 cheque_series_start, cheque_series_end, bank_name, bank_account_number, bank_routing_number,
-		 card_last_4_digits, card_name, subtype, holder_category, balance_available, balance_current,
-		 credit_limit, iso_currency_code, unofficial_currency_code, total_amount, minimum_balance,
-		 starting_credit_card_bal, sorting_order, location_id, created_at, updated_at
-		 FROM payment_methods ORDER BY created_at DESC`)
-	if err != nil {
+	var methods []models.PaymentMethod
+	if err := h.GormDB.Order("created_at DESC").Find(&methods).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	methods := []paymentMethodResponse{}
-	for rows.Next() {
-		var pm paymentMethodResponse
-		if err := rows.Scan(&pm.ID, &pm.PlaidAccountID, &pm.Title, &pm.Description, &pm.MethodType,
-			&pm.ChequeSeriesStart, &pm.ChequeSeriesEnd, &pm.BankName, &pm.BankAccountNumber, &pm.BankRoutingNumber,
-			&pm.CardLast4Digits, &pm.CardName, &pm.Subtype, &pm.HolderCategory, &pm.BalanceAvailable, &pm.BalanceCurrent,
-			&pm.CreditLimit, &pm.IsoCurrencyCode, &pm.UnofficialCurrencyCode, &pm.TotalAmount, &pm.MinimumBalance,
-			&pm.StartingCreditCardBal, &pm.SortingOrder, &pm.LocationID, &pm.CreatedAt, &pm.UpdatedAt); err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan payment method", "error": err.Error()})
-			return
-		}
-		methods = append(methods, pm)
+	result := make([]paymentMethodResponse, len(methods))
+	for i := range methods {
+		result[i] = pmToResponse(&methods[i])
 	}
 
-	c.JSON(http.StatusOK, methods)
+	c.JSON(http.StatusOK, result)
 }
 
 // GET /payment-methods/:payment_method_id
@@ -226,10 +252,8 @@ func (h *PaymentMethodHandler) UpdatePaymentMethod(c *gin.Context) {
 	pmID := c.Param("payment_method_id")
 
 	// Check exists and get current starting_credit_card_bal
-	var currentStartingBal *float64
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT starting_credit_card_bal FROM payment_methods WHERE id = $1", pmID).Scan(&currentStartingBal)
-	if err != nil {
+	var existing models.PaymentMethod
+	if err := h.GormDB.First(&existing, "id = ?", pmID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Payment method not found"})
 		return
 	}
@@ -262,92 +286,81 @@ func (h *PaymentMethodHandler) UpdatePaymentMethod(c *gin.Context) {
 		}
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
+	updates := map[string]interface{}{}
 
 	if req.Title != nil {
-		addClause("title", *req.Title)
+		updates["title"] = *req.Title
 	}
 	if req.Description != nil {
-		addClause("description", *req.Description)
+		updates["description"] = *req.Description
 	}
 	if req.MethodType != nil {
-		addClause("method_type", *req.MethodType)
+		updates["method_type"] = *req.MethodType
 	}
 	if req.ChequeSeriesStart != nil {
-		addClause("cheque_series_start", *req.ChequeSeriesStart)
+		updates["cheque_series_start"] = *req.ChequeSeriesStart
 	}
 	if req.ChequeSeriesEnd != nil {
-		addClause("cheque_series_end", *req.ChequeSeriesEnd)
+		updates["cheque_series_end"] = *req.ChequeSeriesEnd
 	}
 	if req.BankName != nil {
-		addClause("bank_name", *req.BankName)
+		updates["bank_name"] = *req.BankName
 	}
 	if req.BankAccountNumber != nil {
-		addClause("bank_account_number", *req.BankAccountNumber)
+		updates["bank_account_number"] = *req.BankAccountNumber
 	}
 	if req.BankRoutingNumber != nil {
-		addClause("bank_routing_number", *req.BankRoutingNumber)
+		updates["bank_routing_number"] = *req.BankRoutingNumber
 	}
 	if req.CardLast4Digits != nil {
-		addClause("card_last_4_digits", *req.CardLast4Digits)
+		updates["card_last_4_digits"] = *req.CardLast4Digits
 	}
 	if req.CardName != nil {
-		addClause("card_name", *req.CardName)
+		updates["card_name"] = *req.CardName
 	}
 	if req.Subtype != nil {
-		addClause("subtype", *req.Subtype)
+		updates["subtype"] = *req.Subtype
 	}
 	if req.HolderCategory != nil {
-		addClause("holder_category", *req.HolderCategory)
+		updates["holder_category"] = *req.HolderCategory
 	}
 	if req.BalanceAvailable != nil {
-		addClause("balance_available", *req.BalanceAvailable)
+		updates["balance_available"] = *req.BalanceAvailable
 	}
 	if req.BalanceCurrent != nil {
-		addClause("balance_current", *req.BalanceCurrent)
+		updates["balance_current"] = *req.BalanceCurrent
 	}
 	if req.CreditLimit != nil {
-		addClause("credit_limit", *req.CreditLimit)
+		updates["credit_limit"] = *req.CreditLimit
 	}
 	if req.IsoCurrencyCode != nil {
-		addClause("iso_currency_code", *req.IsoCurrencyCode)
+		updates["iso_currency_code"] = *req.IsoCurrencyCode
 	}
 	if req.UnofficialCurrencyCode != nil {
-		addClause("unofficial_currency_code", *req.UnofficialCurrencyCode)
+		updates["unofficial_currency_code"] = *req.UnofficialCurrencyCode
 	}
 	if req.MinimumBalance != nil {
-		addClause("minimum_balance", *req.MinimumBalance)
+		updates["minimum_balance"] = *req.MinimumBalance
 	}
 	if req.SortingOrder != nil {
-		addClause("sorting_order", *req.SortingOrder)
+		updates["sorting_order"] = *req.SortingOrder
 	}
 	if req.LocationID != nil {
-		addClause("location_id", *req.LocationID)
+		updates["location_id"] = *req.LocationID
 	}
 
 	// Check if starting_credit_card_bal is being updated
 	if req.StartingCreditCardBal != nil {
-		addClause("starting_credit_card_bal", *req.StartingCreditCardBal)
+		updates["starting_credit_card_bal"] = *req.StartingCreditCardBal
 		// If the value changed, set is_balance_updated
-		if currentStartingBal == nil || *req.StartingCreditCardBal != *currentStartingBal {
-			addClause("is_balance_updated", true)
+		if existing.StartingCreditCardBal == nil || *req.StartingCreditCardBal != *existing.StartingCreditCardBal {
+			updates["is_balance_updated"] = true
 		}
 	}
 
-	if len(setClauses) > 0 {
-		addClause("updated_at", time.Now().UTC())
-		args = append(args, pmID)
-		query := fmt.Sprintf("UPDATE payment_methods SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err = h.DB.Exec(context.Background(), query, args...)
-		if err != nil {
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now().UTC()
+		if err := h.GormDB.Model(&existing).Updates(updates).Error; err != nil {
 			log.Printf("ERROR: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update payment method", "error": err.Error()})
 			return
@@ -365,13 +378,13 @@ func (h *PaymentMethodHandler) DeletePaymentMethod(c *gin.Context) {
 
 	pmID := c.Param("payment_method_id")
 
-	tag, err := h.DB.Exec(context.Background(), "DELETE FROM payment_methods WHERE id = $1", pmID)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete payment method", "error": err.Error()})
+	result := h.GormDB.Delete(&models.PaymentMethod{}, "id = ?", pmID)
+	if result.Error != nil {
+		log.Printf("ERROR: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete payment method", "error": result.Error.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Payment method not found"})
 		return
 	}
@@ -380,23 +393,16 @@ func (h *PaymentMethodHandler) DeletePaymentMethod(c *gin.Context) {
 }
 
 func (h *PaymentMethodHandler) getPaymentMethodByID(c *gin.Context, id string) {
-	var pm paymentMethodResponse
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, plaid_account_id, title, description, method_type,
-		 cheque_series_start, cheque_series_end, bank_name, bank_account_number, bank_routing_number,
-		 card_last_4_digits, card_name, subtype, holder_category, balance_available, balance_current,
-		 credit_limit, iso_currency_code, unofficial_currency_code, total_amount, minimum_balance,
-		 starting_credit_card_bal, sorting_order, location_id, created_at, updated_at
-		 FROM payment_methods WHERE id = $1`, id,
-	).Scan(&pm.ID, &pm.PlaidAccountID, &pm.Title, &pm.Description, &pm.MethodType,
-		&pm.ChequeSeriesStart, &pm.ChequeSeriesEnd, &pm.BankName, &pm.BankAccountNumber, &pm.BankRoutingNumber,
-		&pm.CardLast4Digits, &pm.CardName, &pm.Subtype, &pm.HolderCategory, &pm.BalanceAvailable, &pm.BalanceCurrent,
-		&pm.CreditLimit, &pm.IsoCurrencyCode, &pm.UnofficialCurrencyCode, &pm.TotalAmount, &pm.MinimumBalance,
-		&pm.StartingCreditCardBal, &pm.SortingOrder, &pm.LocationID, &pm.CreatedAt, &pm.UpdatedAt)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "Payment method not found"})
+	var pm models.PaymentMethod
+	if err := h.GormDB.First(&pm, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"detail": "Payment method not found"})
+			return
+		}
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment method", "error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, pm)
+	c.JSON(http.StatusOK, pmToResponse(&pm))
 }

@@ -14,16 +14,15 @@ import (
 func main() {
 	cfg := config.Load()
 
-	db, err := database.Connect(cfg.DatabaseURL)
+	gormDB, err := database.ConnectGORM(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
 
 	r := gin.Default()
 	r.Use(middleware.CORS())
 
-	routes.Register(r, db, cfg.SecretKey, cfg)
+	routes.Register(r, gormDB, cfg.SecretKey, cfg)
 
 	log.Printf("Server starting on port %s", cfg.Port)
 	if err := r.Run(":" + cfg.Port); err != nil {

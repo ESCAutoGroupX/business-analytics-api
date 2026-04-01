@@ -1,22 +1,22 @@
 package handlers
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type UserHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 type userCreateRequest struct {
@@ -59,34 +59,49 @@ type userOut struct {
 }
 
 func (h *UserHandler) scanUserOut(userID string) (*userOut, error) {
-	var u userOut
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, email, first_name, last_name, mobile_number, is_active, is_superuser, role
-		 FROM users WHERE id = $1`, userID,
-	).Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.MobileNumber, &u.IsActive, &u.IsSuperuser, &u.Role)
-	if err != nil {
+	var user models.User
+	if err := h.GormDB.Preload("Locations").First(&user, "id = ?", userID).Error; err != nil {
 		return nil, err
 	}
-	u.FullName = u.FirstName + " " + u.LastName
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT l.id, l.name FROM locations l
-		 JOIN user_location_association ul ON l.id = ul.location_id
-		 WHERE ul.user_id = $1`, userID)
-	if err == nil {
-		defer rows.Close()
-		u.Locations = []locationOut{}
-		for rows.Next() {
-			var loc locationOut
-			if err := rows.Scan(&loc.ID, &loc.Name); err == nil {
-				u.Locations = append(u.Locations, loc)
-			}
-		}
-	} else {
-		u.Locations = []locationOut{}
+	firstName := ""
+	if user.FirstName != nil {
+		firstName = *user.FirstName
+	}
+	lastName := ""
+	if user.LastName != nil {
+		lastName = *user.LastName
+	}
+	mobileNumber := ""
+	if user.MobileNumber != nil {
+		mobileNumber = *user.MobileNumber
+	}
+	role := ""
+	if user.Role != nil {
+		role = *user.Role
 	}
 
-	return &u, nil
+	out := &userOut{
+		ID:           user.ID,
+		Email:        user.Email,
+		FirstName:    firstName,
+		LastName:     lastName,
+		MobileNumber: mobileNumber,
+		IsActive:     user.IsActive,
+		IsSuperuser:  user.IsSuperuser,
+		Role:         role,
+		FullName:     firstName + " " + lastName,
+		Locations:    []locationOut{},
+	}
+
+	for _, loc := range user.Locations {
+		out.Locations = append(out.Locations, locationOut{
+			ID:   fmt.Sprintf("%d", loc.ID),
+			Name: loc.LocationName,
+		})
+	}
+
+	return out, nil
 }
 
 // GET /users/me
@@ -139,21 +154,15 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 	skip, _ := strconv.Atoi(c.DefaultQuery("skip", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id FROM users OFFSET $1 LIMIT $2`, skip, limit)
-	if err != nil {
+	var userIDs []string
+	if err := h.GormDB.Model(&models.User{}).Offset(skip).Limit(limit).Pluck("id", &userIDs).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query users", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
 	users := []userOut{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			continue
-		}
+	for _, id := range userIDs {
 		u, err := h.scanUserOut(id)
 		if err == nil {
 			users = append(users, *u)
@@ -190,18 +199,16 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	}
 
 	// Check email uniqueness
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
-	if exists {
+	var count int64
+	h.GormDB.Model(&models.User{}).Where("email = ?", req.Email).Count(&count)
+	if count > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Email already registered"})
 		return
 	}
 
 	// Check mobile_number uniqueness
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE mobile_number = $1)", req.MobileNumber).Scan(&exists)
-	if exists {
+	h.GormDB.Model(&models.User{}).Where("mobile_number = ?", req.MobileNumber).Count(&count)
+	if count > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Mobile number already registered"})
 		return
 	}
@@ -218,29 +225,30 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		role = *req.Role
 	}
 
-	id := uuid.New().String()
-	now := time.Now().UTC()
+	user := models.User{
+		ID:             uuid.New().String(),
+		Email:          req.Email,
+		HashedPassword: string(hashedPassword),
+		FirstName:      &req.FirstName,
+		LastName:       &req.LastName,
+		MobileNumber:   &req.MobileNumber,
+		Role:           &role,
+		IsActive:       true,
+		IsSuperuser:    false,
+	}
 
-	_, err = h.DB.Exec(context.Background(),
-		`INSERT INTO users (id, email, hashed_password, first_name, last_name, mobile_number, role, is_active, is_superuser, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, true, false, $8)`,
-		id, req.Email, string(hashedPassword), req.FirstName, req.LastName, req.MobileNumber, role, now,
-	)
-	if err != nil {
+	if err := h.GormDB.Create(&user).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create user", "error": err.Error()})
 		return
 	}
 
 	// Assign locations
-	if len(req.LocationIDs) > 0 {
-		for _, locID := range req.LocationIDs {
-			h.DB.Exec(context.Background(),
-				"INSERT INTO user_location_association (user_id, location_id) VALUES ($1, $2)", id, locID)
-		}
+	for _, locID := range req.LocationIDs {
+		h.GormDB.Create(&models.UserLocation{UserID: user.ID, LocationID: atoiSafe(locID)})
 	}
 
-	u, err := h.scanUserOut(id)
+	u, err := h.scanUserOut(user.ID)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to read created user", "error": err.Error()})
@@ -257,10 +265,9 @@ func (h *UserHandler) PatchUser(c *gin.Context) {
 
 	uid := c.Param("user_id")
 
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", uid).Scan(&exists)
-	if !exists {
+	var count int64
+	h.GormDB.Model(&models.User{}).Where("id = ?", uid).Count(&count)
+	if count == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
@@ -273,9 +280,8 @@ func (h *UserHandler) PatchUser(c *gin.Context) {
 
 	// Check email uniqueness
 	if req.Email != nil {
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND id != $2)", *req.Email, uid).Scan(&exists)
-		if exists {
+		h.GormDB.Model(&models.User{}).Where("email = ? AND id != ?", *req.Email, uid).Count(&count)
+		if count > 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": "Email already registered"})
 			return
 		}
@@ -283,9 +289,8 @@ func (h *UserHandler) PatchUser(c *gin.Context) {
 
 	// Check mobile_number uniqueness
 	if req.MobileNumber != nil {
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM users WHERE mobile_number = $1 AND id != $2)", *req.MobileNumber, uid).Scan(&exists)
-		if exists {
+		h.GormDB.Model(&models.User{}).Where("mobile_number = ? AND id != ?", *req.MobileNumber, uid).Count(&count)
+		if count > 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": "Mobile number already registered"})
 			return
 		}
@@ -312,13 +317,13 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 
 	uid := c.Param("user_id")
 
-	tag, err := h.DB.Exec(context.Background(), "DELETE FROM users WHERE id = $1", uid)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete user", "error": err.Error()})
+	result := h.GormDB.Delete(&models.User{}, "id = ?", uid)
+	if result.Error != nil {
+		log.Printf("ERROR: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete user", "error": result.Error.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
@@ -336,61 +341,56 @@ func (h *UserHandler) requireAdmin(c *gin.Context) bool {
 }
 
 func (h *UserHandler) applyUserUpdate(uid string, req *userUpdateRequest) error {
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
+	updates := map[string]interface{}{}
 
 	if req.Email != nil {
-		addClause("email", *req.Email)
+		updates["email"] = *req.Email
 	}
 	if req.FirstName != nil {
-		addClause("first_name", *req.FirstName)
+		updates["first_name"] = *req.FirstName
 	}
 	if req.LastName != nil {
-		addClause("last_name", *req.LastName)
+		updates["last_name"] = *req.LastName
 	}
 	if req.MobileNumber != nil {
-		addClause("mobile_number", *req.MobileNumber)
+		updates["mobile_number"] = *req.MobileNumber
 	}
 	if req.Role != nil {
-		addClause("role", *req.Role)
+		updates["role"] = *req.Role
 	}
 	if req.IsActive != nil {
-		addClause("is_active", *req.IsActive)
+		updates["is_active"] = *req.IsActive
 	}
 	if req.Password != nil {
 		hashed, err := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
 		if err != nil {
 			return fmt.Errorf("failed to hash password")
 		}
-		addClause("hashed_password", string(hashed))
+		updates["hashed_password"] = string(hashed)
 	}
 
 	// Handle location_ids
 	if req.LocationIDs != nil {
-		// Clear existing
-		h.DB.Exec(context.Background(),
-			"DELETE FROM user_location_association WHERE user_id = $1", uid)
+		h.GormDB.Where("user_id = ?", uid).Delete(&models.UserLocation{})
 		for _, locID := range req.LocationIDs {
-			h.DB.Exec(context.Background(),
-				"INSERT INTO user_location_association (user_id, location_id) VALUES ($1, $2)", uid, locID)
+			h.GormDB.Create(&models.UserLocation{UserID: uid, LocationID: atoiSafe(locID)})
 		}
 	}
 
-	if len(setClauses) > 0 {
-		args = append(args, uid)
-		query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err := h.DB.Exec(context.Background(), query, args...)
-		if err != nil {
+	if len(updates) > 0 {
+		if err := h.GormDB.Model(&models.User{}).Where("id = ?", uid).Updates(updates).Error; err != nil {
 			return fmt.Errorf("failed to update user")
 		}
 	}
 
 	return nil
 }
+
+func atoiSafe(s string) int {
+	v, _ := strconv.Atoi(s)
+	return v
+}
+
+// Ensure gorm.ErrRecordNotFound is referenced to avoid import error
+var _ = errors.Is
+var _ = gorm.ErrRecordNotFound

@@ -17,11 +17,18 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"database/sql"
+
+	"gorm.io/gorm"
 )
 
 type TransactionHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
+}
+
+func (h *TransactionHandler) sqlDB() *sql.DB {
+	db, _ := h.GormDB.DB()
+	return db
 }
 
 // POST /transactions/
@@ -81,7 +88,7 @@ func (h *TransactionHandler) CreateTransaction(c *gin.Context) {
 	query := fmt.Sprintf("INSERT INTO transactions (%s) VALUES (%s)",
 		strings.Join(cols, ", "), strings.Join(placeholders, ", "))
 
-	_, err := h.DB.Exec(context.Background(), query, args...)
+	_, err := h.sqlDB().ExecContext(context.Background(), query, args...)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("failed to create transaction: %v", err), "error": err.Error()})
@@ -202,7 +209,7 @@ func (h *TransactionHandler) ListTransactions(c *gin.Context) {
 	// Count total
 	var totalCount int
 	countQuery := "SELECT COUNT(*) FROM transactions " + where
-	h.DB.QueryRow(context.Background(), countQuery, args...).Scan(&totalCount)
+	h.sqlDB().QueryRowContext(context.Background(), countQuery, args...).Scan(&totalCount)
 
 	totalPages := int(math.Ceil(float64(totalCount) / float64(pageSize)))
 	if page > totalPages && totalPages > 0 {
@@ -215,7 +222,7 @@ func (h *TransactionHandler) ListTransactions(c *gin.Context) {
 		where, sortCol, order, argIdx, argIdx+1)
 	args = append(args, offset, pageSize)
 
-	rows, err := h.DB.Query(context.Background(), dataQuery, args...)
+	rows, err := h.sqlDB().QueryContext(context.Background(), dataQuery, args...)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions", "error": err.Error()})
@@ -263,8 +270,7 @@ func (h *TransactionHandler) GetTransaction(c *gin.Context) {
 	roleStr := fmt.Sprintf("%v", role)
 
 	var txUserID *string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT user_id FROM transactions WHERE id = $1", txID).Scan(&txUserID)
+	err := h.sqlDB().QueryRowContext(context.Background(), "SELECT user_id FROM transactions WHERE id = $1", txID).Scan(&txUserID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Transaction not found"})
 		return
@@ -288,8 +294,7 @@ func (h *TransactionHandler) UpdateTransaction(c *gin.Context) {
 	roleStr := fmt.Sprintf("%v", role)
 
 	var txUserID *string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT user_id FROM transactions WHERE id = $1", txID).Scan(&txUserID)
+	err := h.sqlDB().QueryRowContext(context.Background(), "SELECT user_id FROM transactions WHERE id = $1", txID).Scan(&txUserID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Transaction not found"})
 		return
@@ -350,7 +355,7 @@ func (h *TransactionHandler) UpdateTransaction(c *gin.Context) {
 	query := fmt.Sprintf("UPDATE transactions SET %s WHERE id = $%d",
 		strings.Join(setClauses, ", "), argIdx)
 
-	_, err = h.DB.Exec(context.Background(), query, args...)
+	_, err = h.sqlDB().ExecContext(context.Background(), query, args...)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update transaction", "error": err.Error()})
@@ -362,8 +367,7 @@ func (h *TransactionHandler) UpdateTransaction(c *gin.Context) {
 	editJSON, _ := json.Marshal(editedLog)
 	logID := uuid.New().String()
 
-	h.DB.Exec(context.Background(),
-		`INSERT INTO transaction_change_logs (id, transaction_id, original_data, edited_data, changed_by, changed_at)
+	h.sqlDB().ExecContext(context.Background(), `INSERT INTO transaction_change_logs (id, transaction_id, original_data, edited_data, changed_by, changed_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		logID, txID, string(origJSON), string(editJSON), uid, time.Now().UTC())
 
@@ -380,8 +384,7 @@ func (h *TransactionHandler) DeleteTransaction(c *gin.Context) {
 	roleStr := fmt.Sprintf("%v", role)
 
 	var txUserID *string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT user_id FROM transactions WHERE id = $1", txID).Scan(&txUserID)
+	err := h.sqlDB().QueryRowContext(context.Background(), "SELECT user_id FROM transactions WHERE id = $1", txID).Scan(&txUserID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Transaction not found"})
 		return
@@ -392,7 +395,7 @@ func (h *TransactionHandler) DeleteTransaction(c *gin.Context) {
 		return
 	}
 
-	h.DB.Exec(context.Background(), "DELETE FROM transactions WHERE id = $1", txID)
+	h.sqlDB().ExecContext(context.Background(), "DELETE FROM transactions WHERE id = $1", txID)
 	c.JSON(http.StatusOK, gin.H{"message": "Transaction deleted successfully!"})
 }
 
@@ -462,8 +465,7 @@ func (h *TransactionHandler) ImportData(c *gin.Context) {
 
 		amount, _ := strconv.ParseFloat(amountStr, 64)
 
-		_, err := h.DB.Exec(context.Background(),
-			`INSERT INTO transactions (id, date, vendor, amount, category, location, created_by, user_id, created_at, updated_at)
+		_, err := h.sqlDB().ExecContext(context.Background(), `INSERT INTO transactions (id, date, vendor, amount, category, location, created_by, user_id, created_at, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, 'system', $7, $8, $9)`,
 			id, dateStr, vendorStr, amount, categoryStr, locationStr, uid, now, now)
 		if err != nil {
@@ -488,8 +490,7 @@ func (h *TransactionHandler) UploadDocument(c *gin.Context) {
 	roleStr := fmt.Sprintf("%v", role)
 
 	var txUserID *string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT user_id FROM transactions WHERE id = $1", txID).Scan(&txUserID)
+	err := h.sqlDB().QueryRowContext(context.Background(), "SELECT user_id FROM transactions WHERE id = $1", txID).Scan(&txUserID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Transaction not found"})
 		return
@@ -518,8 +519,7 @@ func (h *TransactionHandler) UploadDocument(c *gin.Context) {
 
 	// Append to documents JSON array
 	var docsJSON *string
-	h.DB.QueryRow(context.Background(),
-		"SELECT documents FROM transactions WHERE id = $1", txID).Scan(&docsJSON)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT documents FROM transactions WHERE id = $1", txID).Scan(&docsJSON)
 
 	var docs []string
 	if docsJSON != nil && *docsJSON != "" {
@@ -528,8 +528,7 @@ func (h *TransactionHandler) UploadDocument(c *gin.Context) {
 	docs = append(docs, filePath)
 	newDocsJSON, _ := json.Marshal(docs)
 
-	h.DB.Exec(context.Background(),
-		"UPDATE transactions SET documents = $1 WHERE id = $2", string(newDocsJSON), txID)
+	h.sqlDB().ExecContext(context.Background(), "UPDATE transactions SET documents = $1 WHERE id = $2", string(newDocsJSON), txID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Document uploaded successfully."})
 }
@@ -538,8 +537,7 @@ func (h *TransactionHandler) UploadDocument(c *gin.Context) {
 func (h *TransactionHandler) ListTransactionChanges(c *gin.Context) {
 	txID := c.Param("transaction_id")
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT cl.id, cl.transaction_id, cl.original_data, cl.edited_data,
+	rows, err := h.sqlDB().QueryContext(context.Background(), `SELECT cl.id, cl.transaction_id, cl.original_data, cl.edited_data,
 		        CONCAT(u.first_name, ' ', u.last_name) AS changed_by_name, cl.changed_at
 		 FROM transaction_change_logs cl
 		 JOIN users u ON cl.changed_by = u.id
@@ -589,8 +587,7 @@ func (h *TransactionHandler) ReverseChange(c *gin.Context) {
 	}
 
 	var transactionID, originalDataStr string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT transaction_id, original_data FROM transaction_change_logs WHERE id = $1", req.ChangeLogID,
+	err := h.sqlDB().QueryRowContext(context.Background(), "SELECT transaction_id, original_data FROM transaction_change_logs WHERE id = $1", req.ChangeLogID,
 	).Scan(&transactionID, &originalDataStr)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Change log not found"})
@@ -599,8 +596,7 @@ func (h *TransactionHandler) ReverseChange(c *gin.Context) {
 
 	// Check transaction exists
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM transactions WHERE id = $1)", transactionID).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM transactions WHERE id = $1)", transactionID).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Transaction not found"})
 		return
@@ -633,7 +629,7 @@ func (h *TransactionHandler) ReverseChange(c *gin.Context) {
 		args = append(args, transactionID)
 		query := fmt.Sprintf("UPDATE transactions SET %s WHERE id = $%d",
 			strings.Join(setClauses, ", "), argIdx)
-		h.DB.Exec(context.Background(), query, args...)
+		h.sqlDB().ExecContext(context.Background(), query, args...)
 	}
 
 	h.getTransactionByIDInternal(c, transactionID)
@@ -653,15 +649,13 @@ func (h *TransactionHandler) UpdateLiabilityMinimumBalance(c *gin.Context) {
 	}
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM liabilities WHERE id = $1)", liabilityID).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM liabilities WHERE id = $1)", liabilityID).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Liability not found"})
 		return
 	}
 
-	_, err := h.DB.Exec(context.Background(),
-		"UPDATE liabilities SET minimum_balance = $1, starting_credit_card_bal = $2 WHERE id = $3",
+	_, err := h.sqlDB().ExecContext(context.Background(), "UPDATE liabilities SET minimum_balance = $1, starting_credit_card_bal = $2 WHERE id = $3",
 		req.MinimumBalance, req.StartingCreditCardBal, liabilityID)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -670,8 +664,7 @@ func (h *TransactionHandler) UpdateLiabilityMinimumBalance(c *gin.Context) {
 	}
 
 	var minBal, startBal string
-	h.DB.QueryRow(context.Background(),
-		"SELECT COALESCE(minimum_balance::text, '0'), COALESCE(starting_credit_card_bal::text, '0') FROM liabilities WHERE id = $1",
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT COALESCE(minimum_balance::text, '0'), COALESCE(starting_credit_card_bal::text, '0') FROM liabilities WHERE id = $1",
 		liabilityID).Scan(&minBal, &startBal)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -692,8 +685,7 @@ func (h *TransactionHandler) getTransactionByIDInternal(c *gin.Context, id strin
 }
 
 func (h *TransactionHandler) loadTransaction(id string) map[string]interface{} {
-	row := h.DB.QueryRow(context.Background(),
-		`SELECT id, plaid_id, account_id, date, authorized_date, transaction_datetime, authorized_datetime,
+	row := h.sqlDB().QueryRowContext(context.Background(), `SELECT id, plaid_id, account_id, date, authorized_date, transaction_datetime, authorized_datetime,
 		 amount, currency_iso, currency_unofficial, available_balance, current_balance, balance_limit,
 		 name, merchant_name, merchant_entity_id, website, logo_url, category, category_id,
 		 personal_finance_category, pfc_icon_url, payment_channel, transaction_type, transaction_code,

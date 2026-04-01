@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"math"
@@ -11,11 +12,16 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 )
 
 type PayBillHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
+}
+
+func (h *PayBillHandler) sqlDB() *sql.DB {
+	db, _ := h.GormDB.DB()
+	return db
 }
 
 // --- PayBill types ---
@@ -197,15 +203,14 @@ func (h *PayBillHandler) CreatePayBill(c *gin.Context) {
 	now := time.Now().UTC()
 
 	var id int
-	err := h.DB.QueryRow(context.Background(),
+	if err := h.sqlDB().QueryRowContext(context.Background(),
 		`INSERT INTO pay_bills (vendor_id, amount, date, category, invoice_url, payment_method_id,
 		 cheque_number, cheque_clearing_date, spent_as, reference, paid_by_check, user_id, created_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
 		req.VendorID, req.Amount, req.Date, req.Category, req.InvoiceURL, req.PaymentMethodID,
 		req.ChequeNumber, req.ChequeClearingDate, req.SpentAs, req.Reference, req.PaidByCheck,
 		uid, now, now,
-	).Scan(&id)
-	if err != nil {
+	).Scan(&id); err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create paybill", "error": err.Error()})
 		return
@@ -213,8 +218,7 @@ func (h *PayBillHandler) CreatePayBill(c *gin.Context) {
 
 	// Insert line items
 	for _, item := range req.LineItems {
-		h.DB.Exec(context.Background(),
-			`INSERT INTO pay_bill_line_items (paybill_id, item, description, qty, unit_price, total_amount, gl_code_id, location_id)
+		h.sqlDB().ExecContext(context.Background(), `INSERT INTO pay_bill_line_items (paybill_id, item, description, qty, unit_price, total_amount, gl_code_id, location_id)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 			id, item.Item, item.Description, item.Qty, item.UnitPrice, item.TotalAmount, item.GLCodeID, item.LocationID)
 	}
@@ -244,7 +248,7 @@ func (h *PayBillHandler) ListPayBills(c *gin.Context) {
 	query += fmt.Sprintf(" ORDER BY updated_at DESC OFFSET $%d LIMIT $%d", argIdx, argIdx+1)
 	args = append(args, skip, limit)
 
-	rows, err := h.DB.Query(context.Background(), query, args...)
+	rows, err := h.sqlDB().QueryContext(context.Background(), query, args...)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query paybills", "error": err.Error()})
@@ -282,8 +286,7 @@ func (h *PayBillHandler) GetPayBill(c *gin.Context) {
 	uid := fmt.Sprintf("%v", userID)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM pay_bills WHERE id = $1 AND user_id = $2)", paybillID, uid).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM pay_bills WHERE id = $1 AND user_id = $2)", paybillID, uid).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "PayBill not found"})
 		return
@@ -304,8 +307,7 @@ func (h *PayBillHandler) UpdatePayBill(c *gin.Context) {
 	uid := fmt.Sprintf("%v", userID)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM pay_bills WHERE id = $1 AND user_id = $2)", paybillID, uid).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM pay_bills WHERE id = $1 AND user_id = $2)", paybillID, uid).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "PayBill not found"})
 		return
@@ -365,15 +367,14 @@ func (h *PayBillHandler) UpdatePayBill(c *gin.Context) {
 		addClause("updated_at", time.Now().UTC())
 		args = append(args, paybillID)
 		query := fmt.Sprintf("UPDATE pay_bills SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		h.DB.Exec(context.Background(), query, args...)
+		h.sqlDB().ExecContext(context.Background(), query, args...)
 	}
 
 	// Replace line items if provided
 	if req.LineItems != nil {
-		h.DB.Exec(context.Background(), "DELETE FROM pay_bill_line_items WHERE paybill_id = $1", paybillID)
+		h.sqlDB().ExecContext(context.Background(), "DELETE FROM pay_bill_line_items WHERE paybill_id = $1", paybillID)
 		for _, item := range *req.LineItems {
-			h.DB.Exec(context.Background(),
-				`INSERT INTO pay_bill_line_items (paybill_id, item, description, qty, unit_price, total_amount, gl_code_id, location_id)
+			h.sqlDB().ExecContext(context.Background(), `INSERT INTO pay_bill_line_items (paybill_id, item, description, qty, unit_price, total_amount, gl_code_id, location_id)
 				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 				paybillID, item.Item, item.Description, item.Qty, item.UnitPrice, item.TotalAmount, item.GLCodeID, item.LocationID)
 		}
@@ -393,9 +394,9 @@ func (h *PayBillHandler) DeletePayBill(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	uid := fmt.Sprintf("%v", userID)
 
-	tag, err := h.DB.Exec(context.Background(),
-		"DELETE FROM pay_bills WHERE id = $1 AND user_id = $2", paybillID, uid)
-	if err != nil || tag.RowsAffected() == 0 {
+	delResult, delErr := h.sqlDB().ExecContext(context.Background(), "DELETE FROM pay_bills WHERE id = $1 AND user_id = $2", paybillID, uid)
+	delAffected, _ := delResult.RowsAffected()
+	if delErr != nil || delAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "PayBill not found"})
 		return
 	}
@@ -419,8 +420,7 @@ func (h *PayBillHandler) CreateSchedulePayment(c *gin.Context) {
 	uid := fmt.Sprintf("%v", userID)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM pay_bills WHERE id = $1 AND user_id = $2)", req.PaybillID, uid).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM pay_bills WHERE id = $1 AND user_id = $2)", req.PaybillID, uid).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "PayBill not found"})
 		return
@@ -428,12 +428,11 @@ func (h *PayBillHandler) CreateSchedulePayment(c *gin.Context) {
 
 	now := time.Now().UTC()
 	var id int
-	err := h.DB.QueryRow(context.Background(),
+	if err := h.sqlDB().QueryRowContext(context.Background(),
 		`INSERT INTO schedule_payments (paybill_id, repeat_every, frequency, start_date, end_date, enabled, created_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
 		req.PaybillID, req.RepeatEvery, req.Frequency, req.StartDate, req.EndDate, req.Enabled, now, now,
-	).Scan(&id)
-	if err != nil {
+	).Scan(&id); err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create schedule payment", "error": err.Error()})
 		return
@@ -450,8 +449,7 @@ func (h *PayBillHandler) ListSchedulePayments(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	uid := fmt.Sprintf("%v", userID)
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT sp.id, sp.paybill_id, sp.repeat_every, sp.frequency, sp.start_date, sp.end_date, sp.enabled, sp.created_at, sp.updated_at
+	rows, err := h.sqlDB().QueryContext(context.Background(), `SELECT sp.id, sp.paybill_id, sp.repeat_every, sp.frequency, sp.start_date, sp.end_date, sp.enabled, sp.created_at, sp.updated_at
 		 FROM schedule_payments sp
 		 JOIN pay_bills pb ON sp.paybill_id = pb.id
 		 WHERE pb.user_id = $1
@@ -496,8 +494,7 @@ func (h *PayBillHandler) GetSchedulePayment(c *gin.Context) {
 	uid := fmt.Sprintf("%v", userID)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		`SELECT EXISTS(SELECT 1 FROM schedule_payments sp JOIN pay_bills pb ON sp.paybill_id = pb.id WHERE sp.id = $1 AND pb.user_id = $2)`,
+	h.sqlDB().QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM schedule_payments sp JOIN pay_bills pb ON sp.paybill_id = pb.id WHERE sp.id = $1 AND pb.user_id = $2)`,
 		spID, uid).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Scheduled payment not found"})
@@ -519,8 +516,7 @@ func (h *PayBillHandler) UpdateSchedulePayment(c *gin.Context) {
 	uid := fmt.Sprintf("%v", userID)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		`SELECT EXISTS(SELECT 1 FROM schedule_payments sp JOIN pay_bills pb ON sp.paybill_id = pb.id WHERE sp.id = $1 AND pb.user_id = $2)`,
+	h.sqlDB().QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM schedule_payments sp JOIN pay_bills pb ON sp.paybill_id = pb.id WHERE sp.id = $1 AND pb.user_id = $2)`,
 		spID, uid).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Scheduled payment not found"})
@@ -563,7 +559,7 @@ func (h *PayBillHandler) UpdateSchedulePayment(c *gin.Context) {
 		addClause("updated_at", time.Now().UTC())
 		args = append(args, spID)
 		query := fmt.Sprintf("UPDATE schedule_payments SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		h.DB.Exec(context.Background(), query, args...)
+		h.sqlDB().ExecContext(context.Background(), query, args...)
 	}
 
 	h.getSchedulePaymentByIDInternal(c, spID)
@@ -581,15 +577,14 @@ func (h *PayBillHandler) DeleteSchedulePayment(c *gin.Context) {
 	uid := fmt.Sprintf("%v", userID)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		`SELECT EXISTS(SELECT 1 FROM schedule_payments sp JOIN pay_bills pb ON sp.paybill_id = pb.id WHERE sp.id = $1 AND pb.user_id = $2)`,
+	h.sqlDB().QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM schedule_payments sp JOIN pay_bills pb ON sp.paybill_id = pb.id WHERE sp.id = $1 AND pb.user_id = $2)`,
 		spID, uid).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Scheduled payment not found"})
 		return
 	}
 
-	h.DB.Exec(context.Background(), "DELETE FROM schedule_payments WHERE id = $1", spID)
+	h.sqlDB().ExecContext(context.Background(), "DELETE FROM schedule_payments WHERE id = $1", spID)
 	c.JSON(http.StatusOK, gin.H{"message": "Scheduled payment deleted successfully!"})
 }
 
@@ -599,8 +594,7 @@ func (h *PayBillHandler) DeleteSchedulePayment(c *gin.Context) {
 
 // GET /paybills/reminders/
 func (h *PayBillHandler) ListReminders(c *gin.Context) {
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id, scheduled_payment_id, reminder_type, message, reminder_date, acknowledged, created_at, updated_at
+	rows, err := h.sqlDB().QueryContext(context.Background(), `SELECT id, scheduled_payment_id, reminder_type, message, reminder_date, acknowledged, created_at, updated_at
 		 FROM reminders WHERE acknowledged = false ORDER BY reminder_date`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -635,20 +629,17 @@ func (h *PayBillHandler) AcknowledgeReminder(c *gin.Context) {
 	}
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM reminders WHERE id = $1)", reminderID).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM reminders WHERE id = $1)", reminderID).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Reminder not found"})
 		return
 	}
 
-	h.DB.Exec(context.Background(),
-		"UPDATE reminders SET acknowledged = true WHERE id = $1", reminderID)
+	h.sqlDB().ExecContext(context.Background(), "UPDATE reminders SET acknowledged = true WHERE id = $1", reminderID)
 
 	var r reminderResponse
 	var reminderDate *time.Time
-	h.DB.QueryRow(context.Background(),
-		`SELECT id, scheduled_payment_id, reminder_type, message, reminder_date, acknowledged, created_at, updated_at
+	h.sqlDB().QueryRowContext(context.Background(), `SELECT id, scheduled_payment_id, reminder_type, message, reminder_date, acknowledged, created_at, updated_at
 		 FROM reminders WHERE id = $1`, reminderID,
 	).Scan(&r.ID, &r.ScheduledPaymentID, &r.ReminderType, &r.Message, &reminderDate, &r.Acknowledged, &r.CreatedAt, &r.UpdatedAt)
 	if reminderDate != nil {
@@ -676,15 +667,14 @@ func (h *PayBillHandler) CreateManualBill(c *gin.Context) {
 	now := time.Now().UTC()
 
 	var id int
-	err := h.DB.QueryRow(context.Background(),
+	if err := h.sqlDB().QueryRowContext(context.Background(),
 		`INSERT INTO manual_bill_entries (vendor_id, amount, due_date, payable_type, gl_code_id,
 		 statement_period, statement_start_date, statement_end_date, notes, user_id, created_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
 		req.VendorID, req.Amount, req.DueDate, req.PayableType, req.GLCodeID,
 		req.StatementPeriod, req.StatementStartDate, req.StatementEndDate, req.Notes,
 		uid, now, now,
-	).Scan(&id)
-	if err != nil {
+	).Scan(&id); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid data or constraint violation while creating manual bill."})
 		return
 	}
@@ -700,8 +690,7 @@ func (h *PayBillHandler) ListManualBills(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	uid := fmt.Sprintf("%v", userID)
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id, vendor_id, amount, due_date, payable_type, gl_code_id,
+	rows, err := h.sqlDB().QueryContext(context.Background(), `SELECT id, vendor_id, amount, due_date, payable_type, gl_code_id,
 		 statement_period, statement_start_date, statement_end_date, notes, status, user_id, created_at, updated_at
 		 FROM manual_bill_entries WHERE user_id = $1 ORDER BY created_at DESC OFFSET $2 LIMIT $3`,
 		uid, skip, limit)
@@ -721,8 +710,7 @@ func (h *PayBillHandler) ListManualBills(c *gin.Context) {
 	}
 
 	// Calculate stats from all bills (unpaginated)
-	allRows, err := h.DB.Query(context.Background(),
-		`SELECT amount, due_date, status, updated_at FROM manual_bill_entries WHERE user_id = $1`, uid)
+	allRows, err := h.sqlDB().QueryContext(context.Background(), `SELECT amount, due_date, status, updated_at FROM manual_bill_entries WHERE user_id = $1`, uid)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": fmt.Sprintf("Database error: %v", err), "error": err.Error()})
@@ -768,8 +756,7 @@ func (h *PayBillHandler) ListManualBills(c *gin.Context) {
 	}
 
 	var totalCount int
-	h.DB.QueryRow(context.Background(),
-		"SELECT COUNT(*) FROM manual_bill_entries WHERE user_id = $1", uid).Scan(&totalCount)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM manual_bill_entries WHERE user_id = $1", uid).Scan(&totalCount)
 
 	c.JSON(http.StatusOK, gin.H{
 		"bills": bills,
@@ -795,8 +782,7 @@ func (h *PayBillHandler) GetManualBill(c *gin.Context) {
 	uid := fmt.Sprintf("%v", userID)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM manual_bill_entries WHERE id = $1 AND user_id = $2)", billID, uid).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM manual_bill_entries WHERE id = $1 AND user_id = $2)", billID, uid).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Manual bill not found"})
 		return
@@ -817,8 +803,7 @@ func (h *PayBillHandler) UpdateManualBill(c *gin.Context) {
 	uid := fmt.Sprintf("%v", userID)
 
 	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM manual_bill_entries WHERE id = $1 AND user_id = $2)", billID, uid).Scan(&exists)
+	h.sqlDB().QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM manual_bill_entries WHERE id = $1 AND user_id = $2)", billID, uid).Scan(&exists)
 	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Manual bill not found"})
 		return
@@ -875,7 +860,7 @@ func (h *PayBillHandler) UpdateManualBill(c *gin.Context) {
 		addClause("updated_at", time.Now().UTC())
 		args = append(args, billID)
 		query := fmt.Sprintf("UPDATE manual_bill_entries SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err = h.DB.Exec(context.Background(), query, args...)
+		_, err = h.sqlDB().ExecContext(context.Background(), query, args...)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid data or constraint violation while updating manual bill."})
 			return
@@ -896,9 +881,9 @@ func (h *PayBillHandler) DeleteManualBill(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	uid := fmt.Sprintf("%v", userID)
 
-	tag, err := h.DB.Exec(context.Background(),
-		"DELETE FROM manual_bill_entries WHERE id = $1 AND user_id = $2", billID, uid)
-	if err != nil || tag.RowsAffected() == 0 {
+	delResult2, delErr2 := h.sqlDB().ExecContext(context.Background(), "DELETE FROM manual_bill_entries WHERE id = $1 AND user_id = $2", billID, uid)
+	delAffected2, _ := delResult2.RowsAffected()
+	if delErr2 != nil || delAffected2 == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Manual bill not found"})
 		return
 	}
@@ -924,8 +909,7 @@ func (h *PayBillHandler) loadPayBill(id int) *paybillResponse {
 	var dateVal *time.Time
 	var clearingDate *time.Time
 
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, vendor_id, amount, date, category, invoice_url, payment_method_id,
+	err := h.sqlDB().QueryRowContext(context.Background(), `SELECT id, vendor_id, amount, date, category, invoice_url, payment_method_id,
 		 cheque_number, cheque_clearing_date, spent_as, reference, paid_by_check, user_id, created_at, updated_at
 		 FROM pay_bills WHERE id = $1`, id,
 	).Scan(&pb.ID, &pb.VendorID, &pb.Amount, &dateVal, &pb.Category, &pb.InvoiceURL, &pb.PaymentMethodID,
@@ -945,8 +929,7 @@ func (h *PayBillHandler) loadPayBill(id int) *paybillResponse {
 
 	// Load line items
 	pb.LineItems = []lineItemResponse{}
-	liRows, err := h.DB.Query(context.Background(),
-		`SELECT id, paybill_id, item, description, qty, unit_price, total_amount, gl_code_id, location_id
+	liRows, err := h.sqlDB().QueryContext(context.Background(), `SELECT id, paybill_id, item, description, qty, unit_price, total_amount, gl_code_id, location_id
 		 FROM pay_bill_line_items WHERE paybill_id = $1`, id)
 	if err == nil {
 		defer liRows.Close()
@@ -959,8 +942,7 @@ func (h *PayBillHandler) loadPayBill(id int) *paybillResponse {
 
 	// Load schedule payments
 	pb.SchedulePayments = []schedPayResponse{}
-	spRows, err := h.DB.Query(context.Background(),
-		`SELECT id, paybill_id, repeat_every, frequency, start_date, end_date, enabled, created_at, updated_at
+	spRows, err := h.sqlDB().QueryContext(context.Background(), `SELECT id, paybill_id, repeat_every, frequency, start_date, end_date, enabled, created_at, updated_at
 		 FROM schedule_payments WHERE paybill_id = $1`, id)
 	if err == nil {
 		defer spRows.Close()
@@ -986,8 +968,7 @@ func (h *PayBillHandler) loadPayBill(id int) *paybillResponse {
 func (h *PayBillHandler) getSchedulePaymentByIDInternal(c *gin.Context, id int) {
 	var sp schedPayResponse
 	var startDate, endDate *time.Time
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, paybill_id, repeat_every, frequency, start_date, end_date, enabled, created_at, updated_at
+	err := h.sqlDB().QueryRowContext(context.Background(), `SELECT id, paybill_id, repeat_every, frequency, start_date, end_date, enabled, created_at, updated_at
 		 FROM schedule_payments WHERE id = $1`, id,
 	).Scan(&sp.ID, &sp.PaybillID, &sp.RepeatEvery, &sp.Frequency, &startDate, &endDate, &sp.Enabled, &sp.CreatedAt, &sp.UpdatedAt)
 	if err != nil {
@@ -1036,7 +1017,7 @@ func (h *PayBillHandler) scanManualBill(row manualBillScannable) *manualBillResp
 }
 
 func (h *PayBillHandler) getManualBillByIDInternal(c *gin.Context, id int, statusCode int) {
-	row := h.DB.QueryRow(context.Background(),
+	row := h.sqlDB().QueryRowContext(context.Background(),
 		`SELECT id, vendor_id, amount, due_date, payable_type, gl_code_id,
 		 statement_period, statement_start_date, statement_end_date, notes, status, user_id, created_at, updated_at
 		 FROM manual_bill_entries WHERE id = $1`, id)

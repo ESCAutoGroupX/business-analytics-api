@@ -2,35 +2,35 @@ package routes
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/handlers"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/middleware"
 )
 
-func Register(r *gin.Engine, db *pgxpool.Pool, secretKey string, cfg *config.Config) {
+func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Config) {
 	authHandler := &handlers.AuthHandler{
-		DB:        db,
+		GormDB:    gormDB,
 		SecretKey: secretKey,
 	}
-	vendorHandler := &handlers.VendorHandler{DB: db}
-	permissionHandler := &handlers.PermissionHandler{DB: db}
-	assetHandler := &handlers.AssetHandler{DB: db}
-	userHandler := &handlers.UserHandler{DB: db}
-	plaidHandler := &handlers.PlaidHandler{DB: db, Cfg: cfg}
-	paymentMethodHandler := &handlers.PaymentMethodHandler{DB: db}
-	cardHandler := &handlers.CardHandler{DB: db}
-	twoFAHandler := &handlers.TwoFactorAuthHandler{DB: db, SecretKey: secretKey}
-	reportHandler := &handlers.ReportHandler{DB: db}
-	locationHandler := &handlers.LocationHandler{DB: db}
-	accountingHandler := &handlers.AccountingHandler{DB: db}
-	payrollHandler := &handlers.PayrollHandler{DB: db}
-	reconciliationHandler := &handlers.ReconciliationHandler{DB: db}
-	transactionHandler := &handlers.TransactionHandler{DB: db}
-	paybillHandler := &handlers.PayBillHandler{DB: db}
-	tekmetricHandler := &handlers.TekmetricHandler{DB: db, Cfg: cfg}
-	dashboardHandler := &handlers.DashboardHandler{DB: db}
+	vendorHandler := &handlers.VendorHandler{GormDB: gormDB}
+	permissionHandler := &handlers.PermissionHandler{GormDB: gormDB}
+	assetHandler := &handlers.AssetHandler{GormDB: gormDB}
+	userHandler := &handlers.UserHandler{GormDB: gormDB}
+	plaidHandler := &handlers.PlaidHandler{GormDB: gormDB, Cfg: cfg}
+	paymentMethodHandler := &handlers.PaymentMethodHandler{GormDB: gormDB}
+	cardHandler := &handlers.CardHandler{GormDB: gormDB}
+	twoFAHandler := &handlers.TwoFactorAuthHandler{GormDB: gormDB, SecretKey: secretKey}
+	reportHandler := &handlers.ReportHandler{GormDB: gormDB}
+	locationHandler := &handlers.LocationHandler{GormDB: gormDB}
+	accountingHandler := &handlers.AccountingHandler{GormDB: gormDB}
+	payrollHandler := &handlers.PayrollHandler{GormDB: gormDB}
+	reconciliationHandler := &handlers.ReconciliationHandler{GormDB: gormDB}
+	transactionHandler := &handlers.TransactionHandler{GormDB: gormDB}
+	paybillHandler := &handlers.PayBillHandler{GormDB: gormDB}
+	tekmetricHandler := &handlers.TekmetricHandler{GormDB: gormDB, Cfg: cfg}
+	dashboardHandler := &handlers.DashboardHandler{GormDB: gormDB}
 
 	// Public routes
 	r.GET("/health", handlers.Health)

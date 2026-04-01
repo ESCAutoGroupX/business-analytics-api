@@ -1,11 +1,9 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net/http"
 	"regexp"
@@ -14,11 +12,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type ReconciliationHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 var worldpayTerminalMap = map[string]int{
@@ -172,24 +172,23 @@ func (h *ReconciliationHandler) DailyMatch(c *gin.Context) {
 		amexSearchDates = append(amexSearchDates, d)
 	}
 
-	// STEP 3 — Pull Plaid deposits from local DB
+	// STEP 3 — Pull Plaid deposits from local DB using GORM
 	// Worldpay query
-	wpQuery := "SELECT name, ABS(amount) AS amount FROM transactions WHERE date = $1 AND amount < 0 AND name ILIKE '%worldpay%'"
-	wpArgs := []interface{}{worldpayDate.Format("2006-01-02")}
-	argIdx := 2
+	wpQuery := h.GormDB.Model(&models.Transaction{}).
+		Select("name, ABS(amount) AS amount").
+		Where("date = ? AND amount < 0 AND name ILIKE ?", worldpayDate.Format("2006-01-02"), "%worldpay%")
 
 	for _, gn := range genericNames {
-		wpQuery += fmt.Sprintf(" AND name != $%d", argIdx)
-		wpArgs = append(wpArgs, gn)
-		argIdx++
+		wpQuery = wpQuery.Where("name != ?", gn)
 	}
 
-	wpRows, err := h.DB.Query(context.Background(), wpQuery, wpArgs...)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query worldpay transactions", "error": err.Error()})
-		return
+	type txNameAmount struct {
+		Name   string
+		Amount float64
 	}
+
+	var wpResults []txNameAmount
+	wpQuery.Find(&wpResults)
 
 	type bankEntry struct {
 		Worldpay float64
@@ -203,27 +202,27 @@ func (h *ReconciliationHandler) DailyMatch(c *gin.Context) {
 	}
 	unmatched := []unmatchedDeposit{}
 
-	for wpRows.Next() {
-		var name string
-		var amount float64
-		wpRows.Scan(&name, &amount)
-
-		shopID := extractShopFromName(name)
+	for _, wp := range wpResults {
+		shopID := extractShopFromName(wp.Name)
 		if shopID != nil {
 			if bankData[*shopID] == nil {
 				bankData[*shopID] = &bankEntry{}
 			}
-			bankData[*shopID].Worldpay += amount
+			bankData[*shopID].Worldpay += wp.Amount
 		} else {
-			unmatched = append(unmatched, unmatchedDeposit{Name: name, Amount: amount})
+			unmatched = append(unmatched, unmatchedDeposit{Name: wp.Name, Amount: wp.Amount})
 		}
 	}
-	wpRows.Close()
 
 	// Amex matching — reverse lookup
 	amexShopToTerminal := map[int]string{}
 	for terminal, shopID := range amexTerminalMap {
 		amexShopToTerminal[shopID] = terminal
+	}
+
+	amexDateStrs := make([]string, len(amexSearchDates))
+	for i, ad := range amexSearchDates {
+		amexDateStrs[i] = ad.Format("2006-01-02")
 	}
 
 	for shopID, sms := range smsMap {
@@ -237,36 +236,21 @@ func (h *ReconciliationHandler) DailyMatch(c *gin.Context) {
 
 		terminalPattern := fmt.Sprintf("%%xxxxxx%s%%", terminal)
 
-		amexQuery := "SELECT name, ABS(amount) AS amount FROM transactions WHERE amount < 0 AND name ILIKE $1 AND date IN ("
-		amexArgs := []interface{}{terminalPattern}
-		for i, ad := range amexSearchDates {
-			if i > 0 {
-				amexQuery += ", "
-			}
-			amexQuery += fmt.Sprintf("$%d", i+2)
-			amexArgs = append(amexArgs, ad.Format("2006-01-02"))
-		}
-		amexQuery += ")"
+		var amexResults []txNameAmount
+		h.GormDB.Model(&models.Transaction{}).
+			Select("name, ABS(amount) AS amount").
+			Where("amount < 0 AND name ILIKE ? AND date IN ?", terminalPattern, amexDateStrs).
+			Find(&amexResults)
 
-		amexRows, err := h.DB.Query(context.Background(), amexQuery, amexArgs...)
-		if err != nil {
-			continue
-		}
-
-		for amexRows.Next() {
-			var name string
-			var amount float64
-			amexRows.Scan(&name, &amount)
-
-			if math.Abs(amount-sms.Amex) <= 1.0 {
+		for _, ar := range amexResults {
+			if math.Abs(ar.Amount-sms.Amex) <= 1.0 {
 				if bankData[shopID] == nil {
 					bankData[shopID] = &bankEntry{}
 				}
-				bankData[shopID].Amex = amount
+				bankData[shopID].Amex = ar.Amount
 				break
 			}
 		}
-		amexRows.Close()
 	}
 
 	// STEP 4 — Compare per shop

@@ -1,17 +1,18 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type PermissionHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 type permissionCreateRequest struct {
@@ -48,6 +49,17 @@ type assignPermissionsRequest struct {
 	PermissionKeywords []string `json:"permission_keywords" binding:"required"`
 }
 
+func permToResponse(p *models.Permission) permissionResponse {
+	return permissionResponse{
+		ID:          p.ID,
+		Keyword:     p.Keyword,
+		Endpoint:    p.Endpoint,
+		Method:      p.Method,
+		Description: &p.Description,
+		IsActive:    p.IsActive,
+	}
+}
+
 func (h *PermissionHandler) CreatePermission(c *gin.Context) {
 	var req permissionCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -56,57 +68,49 @@ func (h *PermissionHandler) CreatePermission(c *gin.Context) {
 	}
 
 	// Check if keyword already exists
-	var exists bool
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM permissions WHERE keyword = $1)", req.Keyword).Scan(&exists)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database error", "error": err.Error()})
-		return
-	}
-	if exists {
+	var count int64
+	h.GormDB.Model(&models.Permission{}).Where("keyword = ?", req.Keyword).Count(&count)
+	if count > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Permission keyword already exists"})
 		return
 	}
 
-	var resp permissionResponse
-	err = h.DB.QueryRow(context.Background(),
-		`INSERT INTO permissions (keyword, endpoint, method, description)
-		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, keyword, endpoint, method, description, is_active`,
-		req.Keyword, req.Endpoint, req.Method, req.Description,
-	).Scan(&resp.ID, &resp.Keyword, &resp.Endpoint, &resp.Method, &resp.Description, &resp.IsActive)
-	if err != nil {
+	desc := ""
+	if req.Description != nil {
+		desc = *req.Description
+	}
+
+	perm := models.Permission{
+		Keyword:     req.Keyword,
+		Endpoint:    req.Endpoint,
+		Method:      req.Method,
+		Description: desc,
+		IsActive:    true,
+	}
+
+	if err := h.GormDB.Create(&perm).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create permission", "error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, permToResponse(&perm))
 }
 
 func (h *PermissionHandler) GetAllPermissions(c *gin.Context) {
-	rows, err := h.DB.Query(context.Background(),
-		"SELECT id, keyword, endpoint, method, description, is_active FROM permissions")
-	if err != nil {
+	var perms []models.Permission
+	if err := h.GormDB.Find(&perms).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query permissions", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	permissions := []permissionResponse{}
-	for rows.Next() {
-		var p permissionResponse
-		if err := rows.Scan(&p.ID, &p.Keyword, &p.Endpoint, &p.Method, &p.Description, &p.IsActive); err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan permission", "error": err.Error()})
-			return
-		}
-		permissions = append(permissions, p)
+	result := make([]permissionResponse, len(perms))
+	for i := range perms {
+		result[i] = permToResponse(&perms[i])
 	}
 
-	c.JSON(http.StatusOK, permissions)
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *PermissionHandler) CreateRole(c *gin.Context) {
@@ -117,92 +121,65 @@ func (h *PermissionHandler) CreateRole(c *gin.Context) {
 	}
 
 	// Check if role already exists
-	var exists bool
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM roles WHERE name = $1)", req.Name).Scan(&exists)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database error", "error": err.Error()})
-		return
-	}
-	if exists {
+	var count int64
+	h.GormDB.Model(&models.Role{}).Where("name = ?", req.Name).Count(&count)
+	if count > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Role already exists"})
 		return
 	}
 
-	tx, err := h.DB.Begin(context.Background())
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to begin transaction", "error": err.Error()})
-		return
+	desc := ""
+	if req.Description != nil {
+		desc = *req.Description
 	}
-	defer tx.Rollback(context.Background())
 
-	var roleID int
-	var roleName string
-	var roleDesc *string
-	var roleActive bool
-	err = tx.QueryRow(context.Background(),
-		`INSERT INTO roles (name, description) VALUES ($1, $2)
-		 RETURNING id, name, description, is_active`,
-		req.Name, req.Description,
-	).Scan(&roleID, &roleName, &roleDesc, &roleActive)
-	if err != nil {
+	err := h.GormDB.Transaction(func(tx *gorm.DB) error {
+		role := models.Role{
+			Name:        req.Name,
+			Description: desc,
+			IsActive:    true,
+		}
+		if err := tx.Create(&role).Error; err != nil {
+			return err
+		}
+
+		for _, keyword := range req.PermissionKeywords {
+			var perm models.Permission
+			if err := tx.Where("keyword = ?", keyword).First(&perm).Error; err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Permission keyword not found: %s", keyword)})
+				return err
+			}
+			if err := tx.Create(&models.RolePermission{RoleID: role.ID, PermissionID: perm.ID}).Error; err != nil {
+				return err
+			}
+		}
+
+		h.getRoleByID(c, role.ID)
+		return nil
+	})
+	if err != nil && !c.Writer.Written() {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create role", "error": err.Error()})
-		return
 	}
-
-	for _, keyword := range req.PermissionKeywords {
-		var permID int
-		err := tx.QueryRow(context.Background(),
-			"SELECT id FROM permissions WHERE keyword = $1", keyword).Scan(&permID)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Permission keyword not found: %s", keyword)})
-			return
-		}
-		_, err = tx.Exec(context.Background(),
-			"INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)", roleID, permID)
-		if err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to assign permission to role", "error": err.Error()})
-			return
-		}
-	}
-
-	if err := tx.Commit(context.Background()); err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to commit transaction", "error": err.Error()})
-		return
-	}
-
-	h.getRoleByID(c, roleID)
 }
 
 func (h *PermissionHandler) GetAllRoles(c *gin.Context) {
-	rows, err := h.DB.Query(context.Background(),
-		"SELECT id, name, description, is_active FROM roles")
-	if err != nil {
+	var dbRoles []models.Role
+	if err := h.GormDB.Find(&dbRoles).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query roles", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	roles := []roleResponse{}
-	for rows.Next() {
-		var r roleResponse
-		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &r.IsActive); err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan role", "error": err.Error()})
-			return
+	roles := make([]roleResponse, len(dbRoles))
+	for i, r := range dbRoles {
+		roles[i] = roleResponse{
+			ID:          r.ID,
+			Name:        r.Name,
+			Description: &r.Description,
+			IsActive:    r.IsActive,
+			Permissions: []permissionResponse{},
 		}
-		r.Permissions = []permissionResponse{}
-		roles = append(roles, r)
-	}
-
-	// Load permissions for each role
-	for i, r := range roles {
 		perms, err := h.getPermissionsForRole(r.ID)
 		if err == nil {
 			roles[i].Permissions = perms
@@ -236,95 +213,74 @@ func (h *PermissionHandler) AssignPermissions(c *gin.Context) {
 	}
 
 	// Verify role exists
-	var exists bool
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM roles WHERE id = $1)", roleID).Scan(&exists)
-	if err != nil || !exists {
+	var count int64
+	h.GormDB.Model(&models.Role{}).Where("id = ?", roleID).Count(&count)
+	if count == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Role not found"})
 		return
 	}
 
-	tx, err := h.DB.Begin(context.Background())
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to begin transaction", "error": err.Error()})
-		return
-	}
-	defer tx.Rollback(context.Background())
-
-	// Clear existing permissions
-	_, err = tx.Exec(context.Background(), "DELETE FROM role_permissions WHERE role_id = $1", roleID)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to clear permissions", "error": err.Error()})
-		return
-	}
-
-	// Assign new permissions
-	for _, keyword := range req.PermissionKeywords {
-		var permID int
-		err := tx.QueryRow(context.Background(),
-			"SELECT id FROM permissions WHERE keyword = $1", keyword).Scan(&permID)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Permission keyword not found: %s", keyword)})
-			return
+	err := h.GormDB.Transaction(func(tx *gorm.DB) error {
+		// Clear existing permissions
+		if err := tx.Where("role_id = ?", roleID).Delete(&models.RolePermission{}).Error; err != nil {
+			return err
 		}
-		_, err = tx.Exec(context.Background(),
-			"INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)", roleID, permID)
-		if err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to assign permission", "error": err.Error()})
-			return
+
+		// Assign new permissions
+		for _, keyword := range req.PermissionKeywords {
+			var perm models.Permission
+			if err := tx.Where("keyword = ?", keyword).First(&perm).Error; err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Permission keyword not found: %s", keyword)})
+				return err
+			}
+			if err := tx.Create(&models.RolePermission{RoleID: roleID, PermissionID: perm.ID}).Error; err != nil {
+				return err
+			}
 		}
-	}
 
-	if err := tx.Commit(context.Background()); err != nil {
+		h.getRoleByID(c, roleID)
+		return nil
+	})
+	if err != nil && !c.Writer.Written() {
 		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to commit transaction", "error": err.Error()})
-		return
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to assign permissions", "error": err.Error()})
 	}
-
-	h.getRoleByID(c, roleID)
 }
 
 func (h *PermissionHandler) getRoleByID(c *gin.Context, roleID int) {
-	var r roleResponse
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT id, name, description, is_active FROM roles WHERE id = $1", roleID,
-	).Scan(&r.ID, &r.Name, &r.Description, &r.IsActive)
-	if err != nil {
+	var role models.Role
+	if err := h.GormDB.First(&role, "id = ?", roleID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Role not found"})
 		return
 	}
 
 	perms, err := h.getPermissionsForRole(roleID)
 	if err != nil {
-		r.Permissions = []permissionResponse{}
-	} else {
-		r.Permissions = perms
+		perms = []permissionResponse{}
 	}
 
-	c.JSON(http.StatusOK, r)
+	c.JSON(http.StatusOK, roleResponse{
+		ID:          role.ID,
+		Name:        role.Name,
+		Description: &role.Description,
+		IsActive:    role.IsActive,
+		Permissions: perms,
+	})
 }
 
 func (h *PermissionHandler) getPermissionsForRole(roleID int) ([]permissionResponse, error) {
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT p.id, p.keyword, p.endpoint, p.method, p.description, p.is_active
-		 FROM permissions p
-		 JOIN role_permissions rp ON p.id = rp.permission_id
-		 WHERE rp.role_id = $1`, roleID)
+	var perms []models.Permission
+	err := h.GormDB.
+		Joins("JOIN role_permissions rp ON rp.permission_id = permissions.id").
+		Where("rp.role_id = ?", roleID).
+		Find(&perms).Error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	perms := []permissionResponse{}
-	for rows.Next() {
-		var p permissionResponse
-		if err := rows.Scan(&p.ID, &p.Keyword, &p.Endpoint, &p.Method, &p.Description, &p.IsActive); err != nil {
-			return nil, err
-		}
-		perms = append(perms, p)
+	result := make([]permissionResponse, len(perms))
+	for i := range perms {
+		result[i] = permToResponse(&perms[i])
 	}
-	return perms, nil
+	return result, nil
 }

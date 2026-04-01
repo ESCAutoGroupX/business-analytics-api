@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,14 +9,15 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
 
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type PlaidHandler struct {
-	DB  *pgxpool.Pool
-	Cfg *config.Config
+	GormDB *gorm.DB
+	Cfg    *config.Config
 }
 
 type publicTokenRequest struct {
@@ -108,17 +108,13 @@ func (h *PlaidHandler) ExchangePublicToken(c *gin.Context) {
 	accessToken, _ := result["access_token"].(string)
 
 	// Verify user exists
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", req.UserID).Scan(&exists)
-	if !exists {
+	var user models.User
+	if err := h.GormDB.First(&user, "id = ?", req.UserID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
 
-	_, err = h.DB.Exec(context.Background(),
-		"UPDATE users SET plaid_access_token = $1 WHERE id = $2", accessToken, req.UserID)
-	if err != nil {
+	if err := h.GormDB.Model(&user).Update("plaid_access_token", accessToken).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to store access token", "error": err.Error()})
 		return
@@ -138,16 +134,14 @@ func (h *PlaidHandler) FetchTransactions(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	uid := fmt.Sprintf("%v", userID)
 
-	var accessToken *string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT plaid_access_token FROM users WHERE id = $1", uid).Scan(&accessToken)
-	if err != nil || accessToken == nil || *accessToken == "" {
+	var user models.User
+	if err := h.GormDB.Select("plaid_access_token").First(&user, "id = ?", uid).Error; err != nil || user.PlaidAccessToken == nil || *user.PlaidAccessToken == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Plaid access token not found for the user"})
 		return
 	}
 
 	result, err := h.plaidRequest("/transactions/get", map[string]interface{}{
-		"access_token": *accessToken,
+		"access_token": *user.PlaidAccessToken,
 		"start_date":   req.StartDate,
 		"end_date":     req.EndDate,
 	})
@@ -164,20 +158,17 @@ func (h *PlaidHandler) SyncTransactions(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	uid := fmt.Sprintf("%v", userID)
 
-	var accessToken *string
-	var cursor *string
-	err := h.DB.QueryRow(context.Background(),
-		"SELECT plaid_access_token, plaid_cursor FROM users WHERE id = $1", uid).Scan(&accessToken, &cursor)
-	if err != nil || accessToken == nil || *accessToken == "" {
+	var user models.User
+	if err := h.GormDB.Select("plaid_access_token, plaid_cursor").First(&user, "id = ?", uid).Error; err != nil || user.PlaidAccessToken == nil || *user.PlaidAccessToken == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Plaid access token not found for the user"})
 		return
 	}
 
 	reqBody := map[string]interface{}{
-		"access_token": *accessToken,
+		"access_token": *user.PlaidAccessToken,
 	}
-	if cursor != nil && *cursor != "" {
-		reqBody["cursor"] = *cursor
+	if user.PlaidCursor != nil && *user.PlaidCursor != "" {
+		reqBody["cursor"] = *user.PlaidCursor
 	}
 
 	result, err := h.plaidRequest("/transactions/sync", reqBody)
@@ -188,8 +179,7 @@ func (h *PlaidHandler) SyncTransactions(c *gin.Context) {
 
 	// Update cursor
 	if newCursor, ok := result["next_cursor"].(string); ok && newCursor != "" {
-		h.DB.Exec(context.Background(),
-			"UPDATE users SET plaid_cursor = $1 WHERE id = $2", newCursor, uid)
+		h.GormDB.Model(&user).Update("plaid_cursor", newCursor)
 	}
 
 	c.JSON(http.StatusOK, result)
@@ -204,20 +194,19 @@ func (h *PlaidHandler) CreateLinkToken(c *gin.Context) {
 	}
 
 	// Verify user exists
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", req.UserID).Scan(&exists)
-	if !exists {
+	var count int64
+	h.GormDB.Model(&models.User{}).Where("id = ?", req.UserID).Count(&count)
+	if count == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
 
 	result, err := h.plaidRequest("/link/token/create", map[string]interface{}{
-		"user":             map[string]string{"client_user_id": req.UserID},
-		"products":         []string{"transactions"},
-		"country_codes":    []string{"US"},
-		"language":         "en",
-		"client_name":      "Business Analytics",
+		"user":          map[string]string{"client_user_id": req.UserID},
+		"products":      []string{"transactions"},
+		"country_codes": []string{"US"},
+		"language":      "en",
+		"client_name":   "Business Analytics",
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
@@ -260,16 +249,13 @@ func (h *PlaidHandler) SandboxConnectBank(c *gin.Context) {
 	accessToken, _ := exchangeResult["access_token"].(string)
 
 	// Store in DB
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", uid).Scan(&exists)
-	if !exists {
+	var user models.User
+	if err := h.GormDB.First(&user, "id = ?", uid).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
 
-	h.DB.Exec(context.Background(),
-		"UPDATE users SET plaid_access_token = $1 WHERE id = $2", accessToken, uid)
+	h.GormDB.Model(&user).Update("plaid_access_token", accessToken)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "Sandbox bank account linked",

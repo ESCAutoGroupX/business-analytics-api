@@ -18,7 +18,7 @@ func (h *DashboardHandler) GetAccountReceivableDashboard(c *gin.Context) {
 	fifteenDaysAgo := now.AddDate(0, 0, -15)
 
 	// Get all shops with WORKINPROGRESS repair orders in current month
-	shopRows, err := h.DB.Query(ctx,
+	shopRows, err := h.sqlDB().QueryContext(ctx,
 		`SELECT DISTINCT ro.shop_id
 		 FROM tekmetric_repair_orders ro
 		 WHERE ro.repair_order_status_code = 'WORKINPROGRESS'
@@ -48,7 +48,7 @@ func (h *DashboardHandler) GetAccountReceivableDashboard(c *gin.Context) {
 		// Get receivables for 0-15 days (created_date >= 15 days ago)
 		var recv015 float64
 		var count015 int
-		h.DB.QueryRow(ctx,
+		h.sqlDB().QueryRowContext(ctx,
 			`SELECT COALESCE(SUM(j.subtotal), 0), COUNT(DISTINCT ro.id)
 			 FROM tekmetric_repair_orders ro
 			 JOIN tekmetric_jobs j ON j.repair_order_id = ro.id
@@ -60,7 +60,7 @@ func (h *DashboardHandler) GetAccountReceivableDashboard(c *gin.Context) {
 		// Get receivables for over 15 days (created_date < 15 days ago)
 		var recvOver15 float64
 		var countOver15 int
-		h.DB.QueryRow(ctx,
+		h.sqlDB().QueryRowContext(ctx,
 			`SELECT COALESCE(SUM(j.subtotal), 0), COUNT(DISTINCT ro.id)
 			 FROM tekmetric_repair_orders ro
 			 JOIN tekmetric_jobs j ON j.repair_order_id = ro.id
@@ -79,7 +79,7 @@ func (h *DashboardHandler) GetAccountReceivableDashboard(c *gin.Context) {
 
 		// Get location name for shop
 		var locationName string
-		h.DB.QueryRow(ctx,
+		h.sqlDB().QueryRowContext(ctx,
 			`SELECT COALESCE(name, '') FROM locations WHERE tekmetric_shop_id = $1`, shopID).Scan(&locationName)
 
 		shops = append(shops, gin.H{
@@ -112,7 +112,7 @@ func (h *DashboardHandler) GetAccountReceivableSummary(c *gin.Context) {
 
 	var totalReceivable float64
 	var totalROs int
-	h.DB.QueryRow(ctx,
+	h.sqlDB().QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(j.subtotal), 0), COUNT(DISTINCT ro.id)
 		 FROM tekmetric_repair_orders ro
 		 JOIN tekmetric_jobs j ON j.repair_order_id = ro.id
@@ -120,7 +120,7 @@ func (h *DashboardHandler) GetAccountReceivableSummary(c *gin.Context) {
 		   AND TO_CHAR(ro.created_date, 'YYYY-MM') = $1`, currentMonth).Scan(&totalReceivable, &totalROs)
 
 	var recv015 float64
-	h.DB.QueryRow(ctx,
+	h.sqlDB().QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(j.subtotal), 0)
 		 FROM tekmetric_repair_orders ro
 		 JOIN tekmetric_jobs j ON j.repair_order_id = ro.id
@@ -129,7 +129,7 @@ func (h *DashboardHandler) GetAccountReceivableSummary(c *gin.Context) {
 		   AND ro.created_date >= $2`, currentMonth, fifteenDaysAgo).Scan(&recv015)
 
 	var recvOver15 float64
-	h.DB.QueryRow(ctx,
+	h.sqlDB().QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(j.subtotal), 0)
 		 FROM tekmetric_repair_orders ro
 		 JOIN tekmetric_jobs j ON j.repair_order_id = ro.id
@@ -154,7 +154,7 @@ func (h *DashboardHandler) GetAccountReceivableByShop(c *gin.Context) {
 	fifteenDaysAgo := now.AddDate(0, 0, -15)
 
 	// Get jobs with repair order, customer, vehicle info
-	rows, err := h.DB.Query(ctx,
+	rows, err := h.sqlDB().QueryContext(ctx,
 		`SELECT ro.id, ro.tekmetric_ro_id, ro.ro_number, ro.created_date,
 		        j.name, j.subtotal, j.parts_total, j.labor_total, j.fee_total, j.discount_total,
 		        j.authorized,
@@ -243,7 +243,7 @@ func (h *DashboardHandler) GetAgingReceivables(c *gin.Context) {
 
 	// Count total
 	var totalRecords int
-	h.DB.QueryRow(ctx,
+	h.sqlDB().QueryRowContext(ctx,
 		`SELECT COUNT(DISTINCT ro.id)
 		 FROM tekmetric_repair_orders ro
 		 WHERE ro.repair_order_status_code = 'WORKINPROGRESS'
@@ -253,7 +253,7 @@ func (h *DashboardHandler) GetAgingReceivables(c *gin.Context) {
 
 	// Total receivable for aging
 	var totalReceivable float64
-	h.DB.QueryRow(ctx,
+	h.sqlDB().QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(j.subtotal), 0)
 		 FROM tekmetric_repair_orders ro
 		 JOIN tekmetric_jobs j ON j.repair_order_id = ro.id
@@ -261,7 +261,7 @@ func (h *DashboardHandler) GetAgingReceivables(c *gin.Context) {
 		   AND ro.created_date <= $1`, fortyFiveDaysAgo).Scan(&totalReceivable)
 
 	offset := (page - 1) * size
-	rows, err := h.DB.Query(ctx,
+	rows, err := h.sqlDB().QueryContext(ctx,
 		`SELECT ro.id, ro.tekmetric_ro_id, ro.shop_id, ro.ro_number, ro.created_date,
 		        ro.customer_id, ro.vehicle_id, COALESCE(ro.total_sales, 0),
 		        COALESCE(ro.amount_paid, 0), COALESCE(ro.taxes, 0)
@@ -295,7 +295,7 @@ func (h *DashboardHandler) GetAgingReceivables(c *gin.Context) {
 
 		// Get jobs subtotal for this RO
 		var roSubtotal float64
-		h.DB.QueryRow(ctx,
+		h.sqlDB().QueryRowContext(ctx,
 			`SELECT COALESCE(SUM(subtotal), 0) FROM tekmetric_jobs WHERE repair_order_id = $1`, roID).Scan(&roSubtotal)
 
 		entry := gin.H{
@@ -336,7 +336,7 @@ func (h *DashboardHandler) GetAccountReceivableGraph(c *gin.Context) {
 	startDate := now.AddDate(0, 0, -7*weeks)
 
 	// Get all shops that have WORKINPROGRESS ROs
-	shopRows, err := h.DB.Query(ctx,
+	shopRows, err := h.sqlDB().QueryContext(ctx,
 		`SELECT DISTINCT ro.shop_id
 		 FROM tekmetric_repair_orders ro
 		 WHERE ro.repair_order_status_code = 'WORKINPROGRESS'
@@ -361,7 +361,7 @@ func (h *DashboardHandler) GetAccountReceivableGraph(c *gin.Context) {
 	for _, shopID := range shopIDs {
 		// Get location name
 		var locationName string
-		h.DB.QueryRow(ctx,
+		h.sqlDB().QueryRowContext(ctx,
 			`SELECT COALESCE(name, '') FROM locations WHERE tekmetric_shop_id = $1`, shopID).Scan(&locationName)
 
 		// For each day in range, compute total receivable for this shop
@@ -370,7 +370,7 @@ func (h *DashboardHandler) GetAccountReceivableGraph(c *gin.Context) {
 		for !current.After(now) {
 			dateStr := current.Format("2006-01-02")
 			var dayTotal float64
-			h.DB.QueryRow(ctx,
+			h.sqlDB().QueryRowContext(ctx,
 				`SELECT COALESCE(SUM(j.subtotal), 0)
 				 FROM tekmetric_repair_orders ro
 				 JOIN tekmetric_jobs j ON j.repair_order_id = ro.id

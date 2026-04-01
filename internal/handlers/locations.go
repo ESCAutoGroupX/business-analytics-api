@@ -1,32 +1,32 @@
 package handlers
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type LocationHandler struct {
-	DB  *pgxpool.Pool
-	Cfg interface{} // for future Tekmetric config
+	GormDB *gorm.DB
 }
 
 type locationCreateRequest struct {
-	LocationName string  `json:"location_name" binding:"required"`
-	AddressLine1 string  `json:"address_line_1" binding:"required"`
-	AddressLine2 *string `json:"address_line_2"`
-	City         string  `json:"city" binding:"required"`
-	StateProvince string `json:"state_province" binding:"required"`
-	PostalCode   string  `json:"postal_code" binding:"required"`
-	Country      string  `json:"country" binding:"required"`
-	ShopID       int     `json:"shop_id" binding:"required"`
+	LocationName  string  `json:"location_name" binding:"required"`
+	AddressLine1  string  `json:"address_line_1" binding:"required"`
+	AddressLine2  *string `json:"address_line_2"`
+	City          string  `json:"city" binding:"required"`
+	StateProvince string  `json:"state_province" binding:"required"`
+	PostalCode    string  `json:"postal_code" binding:"required"`
+	Country       string  `json:"country" binding:"required"`
+	ShopID        int     `json:"shop_id" binding:"required"`
 }
 
 type locationUpdateRequest struct {
@@ -41,17 +41,17 @@ type locationUpdateRequest struct {
 }
 
 type locationResponse struct {
-	ID              int        `json:"id"`
-	LocationName    string     `json:"location_name"`
-	AddressLine1    string     `json:"address_line_1"`
-	AddressLine2    *string    `json:"address_line_2"`
-	City            string     `json:"city"`
-	StateProvince   string     `json:"state_province"`
-	PostalCode      string     `json:"postal_code"`
-	Country         string     `json:"country"`
-	ShopID          *int       `json:"shop_id"`
-	CreatedAt       *time.Time `json:"created_at"`
-	UpdatedAt       *time.Time `json:"updated_at"`
+	ID            int        `json:"id"`
+	LocationName  string     `json:"location_name"`
+	AddressLine1  string     `json:"address_line_1"`
+	AddressLine2  *string    `json:"address_line_2"`
+	City          string     `json:"city"`
+	StateProvince string     `json:"state_province"`
+	PostalCode    string     `json:"postal_code"`
+	Country       string     `json:"country"`
+	ShopID        *int       `json:"shop_id"`
+	CreatedAt     *time.Time `json:"created_at"`
+	UpdatedAt     *time.Time `json:"updated_at"`
 }
 
 type shopInfoCreateRequest struct {
@@ -73,6 +73,49 @@ type shopInfoResponse struct {
 	PDFForwardingEmail *string    `json:"pdf_forwarding_email"`
 	CreatedAt          *time.Time `json:"created_at"`
 	UpdatedAt          *time.Time `json:"updated_at"`
+}
+
+func locToResponse(loc *models.Location) locationResponse {
+	resp := locationResponse{
+		ID:           loc.ID,
+		LocationName: loc.LocationName,
+		ShopID:       loc.ShopID,
+		CreatedAt:    &loc.CreatedAt,
+		UpdatedAt:    &loc.UpdatedAt,
+	}
+	if loc.AddressLine1 != nil {
+		resp.AddressLine1 = *loc.AddressLine1
+	}
+	resp.AddressLine2 = loc.AddressLine2
+	if loc.City != nil {
+		resp.City = *loc.City
+	}
+	if loc.StateProvince != nil {
+		resp.StateProvince = *loc.StateProvince
+	}
+	if loc.PostalCode != nil {
+		resp.PostalCode = *loc.PostalCode
+	}
+	if loc.Country != nil {
+		resp.Country = *loc.Country
+	}
+	return resp
+}
+
+func shopToResponse(si *models.ShopInfo) shopInfoResponse {
+	resp := shopInfoResponse{
+		ID:                 si.ID,
+		PDFForwardingEmail: si.PDFForwardingEmail,
+		CreatedAt:          &si.CreatedAt,
+		UpdatedAt:          &si.UpdatedAt,
+	}
+	if si.ShopName != nil {
+		resp.ShopName = *si.ShopName
+	}
+	if si.ContactEmail != nil {
+		resp.ContactEmail = *si.ContactEmail
+	}
+	return resp
 }
 
 func (h *LocationHandler) requireAdmin(c *gin.Context) bool {
@@ -97,29 +140,31 @@ func (h *LocationHandler) CreateLocation(c *gin.Context) {
 	}
 
 	// Validate shop_id
-	var shopExists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM shop_info WHERE id = $1)", req.ShopID).Scan(&shopExists)
-	if !shopExists {
+	var count int64
+	h.GormDB.Model(&models.ShopInfo{}).Where("id = ?", req.ShopID).Count(&count)
+	if count == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid shop_id"})
 		return
 	}
 
-	now := time.Now().UTC()
-	var id int
-	err := h.DB.QueryRow(context.Background(),
-		`INSERT INTO locations (location_name, address_line_1, address_line_2, city, state_province, postal_code, country, shop_id, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 RETURNING id`,
-		req.LocationName, req.AddressLine1, req.AddressLine2, req.City, req.StateProvince, req.PostalCode, req.Country, req.ShopID, now, now,
-	).Scan(&id)
-	if err != nil {
+	loc := models.Location{
+		LocationName:  req.LocationName,
+		AddressLine1:  &req.AddressLine1,
+		AddressLine2:  req.AddressLine2,
+		City:          &req.City,
+		StateProvince: &req.StateProvince,
+		PostalCode:    &req.PostalCode,
+		Country:       &req.Country,
+		ShopID:        &req.ShopID,
+	}
+
+	if err := h.GormDB.Create(&loc).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create location", "error": err.Error()})
 		return
 	}
 
-	h.getLocationByID(c, id)
+	h.getLocationByID(c, loc.ID)
 }
 
 // GET /locations/
@@ -127,30 +172,19 @@ func (h *LocationHandler) GetAllLocations(c *gin.Context) {
 	skip, _ := strconv.Atoi(c.DefaultQuery("skip", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id, location_name, address_line_1, address_line_2, city, state_province, postal_code, country, shop_id, created_at, updated_at
-		 FROM locations OFFSET $1 LIMIT $2`, skip, limit)
-	if err != nil {
+	var locs []models.Location
+	if err := h.GormDB.Offset(skip).Limit(limit).Find(&locs).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query locations", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	locations := []locationResponse{}
-	for rows.Next() {
-		var loc locationResponse
-		if err := rows.Scan(&loc.ID, &loc.LocationName, &loc.AddressLine1, &loc.AddressLine2,
-			&loc.City, &loc.StateProvince, &loc.PostalCode, &loc.Country, &loc.ShopID,
-			&loc.CreatedAt, &loc.UpdatedAt); err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan location", "error": err.Error()})
-			return
-		}
-		locations = append(locations, loc)
+	result := make([]locationResponse, len(locs))
+	for i := range locs {
+		result[i] = locToResponse(&locs[i])
 	}
 
-	c.JSON(http.StatusOK, locations)
+	c.JSON(http.StatusOK, result)
 }
 
 // GET /locations/:location_id
@@ -180,10 +214,8 @@ func (h *LocationHandler) UpdateLocation(c *gin.Context) {
 		return
 	}
 
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM locations WHERE id = $1)", locationID).Scan(&exists)
-	if !exists {
+	var loc models.Location
+	if err := h.GormDB.First(&loc, "id = ?", locationID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Location not found"})
 		return
 	}
@@ -196,56 +228,43 @@ func (h *LocationHandler) UpdateLocation(c *gin.Context) {
 
 	// Validate shop_id if provided
 	if req.ShopID != nil {
-		var shopExists bool
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM shop_info WHERE id = $1)", *req.ShopID).Scan(&shopExists)
-		if !shopExists {
+		var count int64
+		h.GormDB.Model(&models.ShopInfo{}).Where("id = ?", *req.ShopID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": "Invalid shop_id"})
 			return
 		}
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
-
+	updates := map[string]interface{}{}
 	if req.LocationName != nil {
-		addClause("location_name", *req.LocationName)
+		updates["location_name"] = *req.LocationName
 	}
 	if req.AddressLine1 != nil {
-		addClause("address_line_1", *req.AddressLine1)
+		updates["address_line_1"] = *req.AddressLine1
 	}
 	if req.AddressLine2 != nil {
-		addClause("address_line_2", *req.AddressLine2)
+		updates["address_line_2"] = *req.AddressLine2
 	}
 	if req.City != nil {
-		addClause("city", *req.City)
+		updates["city"] = *req.City
 	}
 	if req.StateProvince != nil {
-		addClause("state_province", *req.StateProvince)
+		updates["state_province"] = *req.StateProvince
 	}
 	if req.PostalCode != nil {
-		addClause("postal_code", *req.PostalCode)
+		updates["postal_code"] = *req.PostalCode
 	}
 	if req.Country != nil {
-		addClause("country", *req.Country)
+		updates["country"] = *req.Country
 	}
 	if req.ShopID != nil {
-		addClause("shop_id", *req.ShopID)
+		updates["shop_id"] = *req.ShopID
 	}
 
-	if len(setClauses) > 0 {
-		addClause("updated_at", time.Now().UTC())
-		args = append(args, locationID)
-		query := fmt.Sprintf("UPDATE locations SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err = h.DB.Exec(context.Background(), query, args...)
-		if err != nil {
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now().UTC()
+		if err := h.GormDB.Model(&loc).Updates(updates).Error; err != nil {
 			log.Printf("ERROR: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update location", "error": err.Error()})
 			return
@@ -267,13 +286,13 @@ func (h *LocationHandler) DeleteLocation(c *gin.Context) {
 		return
 	}
 
-	tag, err := h.DB.Exec(context.Background(), "DELETE FROM locations WHERE id = $1", locationID)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete location", "error": err.Error()})
+	result := h.GormDB.Delete(&models.Location{}, "id = ?", locationID)
+	if result.Error != nil {
+		log.Printf("ERROR: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete location", "error": result.Error.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Location not found"})
 		return
 	}
@@ -282,19 +301,18 @@ func (h *LocationHandler) DeleteLocation(c *gin.Context) {
 }
 
 func (h *LocationHandler) getLocationByID(c *gin.Context, id int) {
-	var loc locationResponse
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, location_name, address_line_1, address_line_2, city, state_province, postal_code, country, shop_id, created_at, updated_at
-		 FROM locations WHERE id = $1`, id,
-	).Scan(&loc.ID, &loc.LocationName, &loc.AddressLine1, &loc.AddressLine2,
-		&loc.City, &loc.StateProvince, &loc.PostalCode, &loc.Country, &loc.ShopID,
-		&loc.CreatedAt, &loc.UpdatedAt)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "Location not found"})
+	var loc models.Location
+	if err := h.GormDB.First(&loc, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"detail": "Location not found"})
+			return
+		}
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query location", "error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, loc)
+	c.JSON(http.StatusOK, locToResponse(&loc))
 }
 
 // POST /locations/shop-info/
@@ -305,21 +323,19 @@ func (h *LocationHandler) CreateShopInfo(c *gin.Context) {
 		return
 	}
 
-	now := time.Now().UTC()
-	var id int
-	err := h.DB.QueryRow(context.Background(),
-		`INSERT INTO shop_info (shop_name, contact_email, pdf_forwarding_email, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id`,
-		req.ShopName, req.ContactEmail, req.PDFForwardingEmail, now, now,
-	).Scan(&id)
-	if err != nil {
+	si := models.ShopInfo{
+		ShopName:           &req.ShopName,
+		ContactEmail:       &req.ContactEmail,
+		PDFForwardingEmail: req.PDFForwardingEmail,
+	}
+
+	if err := h.GormDB.Create(&si).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create shop info", "error": err.Error()})
 		return
 	}
 
-	h.getShopInfoByID(c, id)
+	h.getShopInfoByID(c, si.ID)
 }
 
 // GET /locations/shop-info/:shop_info_id
@@ -338,29 +354,19 @@ func (h *LocationHandler) GetAllShopInfos(c *gin.Context) {
 	skip, _ := strconv.Atoi(c.DefaultQuery("skip", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id, shop_name, contact_email, pdf_forwarding_email, created_at, updated_at
-		 FROM shop_info OFFSET $1 LIMIT $2`, skip, limit)
-	if err != nil {
+	var infos []models.ShopInfo
+	if err := h.GormDB.Offset(skip).Limit(limit).Find(&infos).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query shop infos", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	infos := []shopInfoResponse{}
-	for rows.Next() {
-		var si shopInfoResponse
-		if err := rows.Scan(&si.ID, &si.ShopName, &si.ContactEmail, &si.PDFForwardingEmail,
-			&si.CreatedAt, &si.UpdatedAt); err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan shop info", "error": err.Error()})
-			return
-		}
-		infos = append(infos, si)
+	result := make([]shopInfoResponse, len(infos))
+	for i := range infos {
+		result[i] = shopToResponse(&infos[i])
 	}
 
-	c.JSON(http.StatusOK, infos)
+	c.JSON(http.StatusOK, result)
 }
 
 // PATCH /locations/shop-info/:shop_info_id
@@ -371,10 +377,8 @@ func (h *LocationHandler) UpdateShopInfo(c *gin.Context) {
 		return
 	}
 
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM shop_info WHERE id = $1)", shopInfoID).Scan(&exists)
-	if !exists {
+	var si models.ShopInfo
+	if err := h.GormDB.First(&si, "id = ?", shopInfoID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Shop info not found"})
 		return
 	}
@@ -385,32 +389,20 @@ func (h *LocationHandler) UpdateShopInfo(c *gin.Context) {
 		return
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
-
+	updates := map[string]interface{}{}
 	if req.ShopName != nil {
-		addClause("shop_name", *req.ShopName)
+		updates["shop_name"] = *req.ShopName
 	}
 	if req.ContactEmail != nil {
-		addClause("contact_email", *req.ContactEmail)
+		updates["contact_email"] = *req.ContactEmail
 	}
 	if req.PDFForwardingEmail != nil {
-		addClause("pdf_forwarding_email", *req.PDFForwardingEmail)
+		updates["pdf_forwarding_email"] = *req.PDFForwardingEmail
 	}
 
-	if len(setClauses) > 0 {
-		addClause("updated_at", time.Now().UTC())
-		args = append(args, shopInfoID)
-		query := fmt.Sprintf("UPDATE shop_info SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err = h.DB.Exec(context.Background(), query, args...)
-		if err != nil {
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now().UTC()
+		if err := h.GormDB.Model(&si).Updates(updates).Error; err != nil {
 			log.Printf("ERROR: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update shop info", "error": err.Error()})
 			return
@@ -428,13 +420,13 @@ func (h *LocationHandler) DeleteShopInfo(c *gin.Context) {
 		return
 	}
 
-	tag, err := h.DB.Exec(context.Background(), "DELETE FROM shop_info WHERE id = $1", shopInfoID)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete shop info", "error": err.Error()})
+	result := h.GormDB.Delete(&models.ShopInfo{}, "id = ?", shopInfoID)
+	if result.Error != nil {
+		log.Printf("ERROR: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete shop info", "error": result.Error.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Shop info not found"})
 		return
 	}
@@ -443,16 +435,16 @@ func (h *LocationHandler) DeleteShopInfo(c *gin.Context) {
 }
 
 func (h *LocationHandler) getShopInfoByID(c *gin.Context, id int) {
-	var si shopInfoResponse
-	err := h.DB.QueryRow(context.Background(),
-		`SELECT id, shop_name, contact_email, pdf_forwarding_email, created_at, updated_at
-		 FROM shop_info WHERE id = $1`, id,
-	).Scan(&si.ID, &si.ShopName, &si.ContactEmail, &si.PDFForwardingEmail,
-		&si.CreatedAt, &si.UpdatedAt)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "Shop info not found"})
+	var si models.ShopInfo
+	if err := h.GormDB.First(&si, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"detail": "Shop info not found"})
+			return
+		}
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query shop info", "error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, si)
+	c.JSON(http.StatusOK, shopToResponse(&si))
 }

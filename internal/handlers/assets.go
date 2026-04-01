@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,11 +11,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type AssetHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 type assetCreateRequest struct {
@@ -63,6 +65,32 @@ type assetResponse struct {
 	UpdatedAt                      *time.Time `json:"updated_at"`
 }
 
+func assetToResponse(a *models.Asset) assetResponse {
+	return assetResponse{
+		ID:                             a.ID,
+		AssetName:                      &a.AssetName,
+		Description:                    a.Description,
+		OriginalCost:                   &a.OriginalCost,
+		SalvageValue:                   a.SalvageValue,
+		UsefulLife:                     a.UsefulLife,
+		InitialAccumulatedDepreciation: a.InitialAccumulatedDepreciation,
+		AssetCategory:                  a.AssetCategory,
+		FixedAssetAccount:              a.FixedAssetAccount,
+		AccumulatedDepreciationAccount: a.AccumulatedDepreciationAccount,
+		DepreciationExpenseAccount:     a.DepreciationExpenseAccount,
+		Method:                         a.Method,
+		DepreciationFrequency:          a.DepreciationFrequency,
+		DepreciationConvention:         a.DepreciationConvention,
+		AcquisitionDate:                a.AcquisitionDate,
+		StartDate:                      a.StartDate,
+		EndDate:                        a.EndDate,
+		Location:                       a.LocationField,
+		VendorID:                       a.VendorID,
+		CreatedAt:                      &a.CreatedAt,
+		UpdatedAt:                      &a.UpdatedAt,
+	}
+}
+
 func (h *AssetHandler) CreateAsset(c *gin.Context) {
 	var req assetCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -72,17 +100,15 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 
 	// Validate vendor_id if provided
 	if req.VendorID != nil && *req.VendorID != "" {
-		var exists bool
-		err := h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM vendors WHERE id = $1)", *req.VendorID).Scan(&exists)
-		if err != nil || !exists {
+		var count int64
+		h.GormDB.Model(&models.Vendor{}).Where("id = ?", *req.VendorID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Invalid vendor_id: %s. Vendor does not exist.", *req.VendorID)})
 			return
 		}
 	}
 
 	assetID := fmt.Sprintf("AST-%s", strings.ToUpper(uuid.New().String()[:8]))
-	now := time.Now().UTC()
 
 	// Defaults
 	salvageValue := 0.0
@@ -110,43 +136,45 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 		deprConvention = *req.DepreciationConvention
 	}
 
-	var acquisitionDate, startDate, endDate *time.Time
-	if req.AcquisitionDate != nil {
-		if t, err := time.Parse("2006-01-02", *req.AcquisitionDate); err == nil {
-			acquisitionDate = &t
-		}
-	}
-	if req.StartDate != nil {
-		if t, err := time.Parse("2006-01-02", *req.StartDate); err == nil {
-			startDate = &t
-		}
-	}
-	if req.EndDate != nil {
-		if t, err := time.Parse("2006-01-02", *req.EndDate); err == nil {
-			endDate = &t
-		}
+	var originalCost float64
+	if req.OriginalCost != nil {
+		originalCost = *req.OriginalCost
 	}
 
-	var id int
-	err := h.DB.QueryRow(context.Background(),
-		`INSERT INTO assets (asset_id, asset_name, description, original_cost, salvage_value, useful_life,
-		 initial_accumulated_depreciation, asset_category, fixed_asset_account, accumulated_depreciation_account,
-		 depreciation_expense_account, method, depreciation_frequency, depreciation_convention,
-		 acquisition_date, start_date, end_date, location, vendor_id, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-		 RETURNING id`,
-		assetID, req.AssetName, req.Description, req.OriginalCost, salvageValue, req.UsefulLife,
-		initialAccumDepr, assetCategory, req.FixedAssetAccount, req.AccumulatedDepreciationAccount,
-		req.DepreciationExpenseAccount, method, deprFrequency, deprConvention,
-		acquisitionDate, startDate, endDate, req.Location, req.VendorID, now, now,
-	).Scan(&id)
-	if err != nil {
+	var assetName string
+	if req.AssetName != nil {
+		assetName = *req.AssetName
+	}
+
+	asset := models.Asset{
+		AssetID:                        assetID,
+		AssetName:                      assetName,
+		Description:                    req.Description,
+		OriginalCost:                   originalCost,
+		SalvageValue:                   &salvageValue,
+		UsefulLife:                     req.UsefulLife,
+		InitialAccumulatedDepreciation: &initialAccumDepr,
+		AssetCategory:                  &assetCategory,
+		FixedAssetAccount:              req.FixedAssetAccount,
+		AccumulatedDepreciationAccount: req.AccumulatedDepreciationAccount,
+		DepreciationExpenseAccount:     req.DepreciationExpenseAccount,
+		Method:                         &method,
+		DepreciationFrequency:          &deprFrequency,
+		DepreciationConvention:         &deprConvention,
+		AcquisitionDate:                req.AcquisitionDate,
+		StartDate:                      req.StartDate,
+		EndDate:                        req.EndDate,
+		LocationField:                  req.Location,
+		VendorID:                       req.VendorID,
+	}
+
+	if err := h.GormDB.Create(&asset).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create asset", "error": err.Error()})
 		return
 	}
 
-	h.getAssetByID(c, id)
+	h.getAssetByID(c, asset.ID)
 }
 
 func (h *AssetHandler) GetAsset(c *gin.Context) {
@@ -163,31 +191,19 @@ func (h *AssetHandler) GetAllAssets(c *gin.Context) {
 	skip, _ := strconv.Atoi(c.DefaultQuery("skip", "0"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 
-	rows, err := h.DB.Query(context.Background(),
-		`SELECT id, asset_name, description, original_cost, salvage_value, useful_life,
-		 initial_accumulated_depreciation, asset_category, fixed_asset_account, accumulated_depreciation_account,
-		 depreciation_expense_account, method, depreciation_frequency, depreciation_convention,
-		 acquisition_date, start_date, end_date, location, vendor_id, created_at, updated_at
-		 FROM assets OFFSET $1 LIMIT $2`, skip, limit)
-	if err != nil {
+	var assets []models.Asset
+	if err := h.GormDB.Offset(skip).Limit(limit).Find(&assets).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query assets", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	assets := []assetResponse{}
-	for rows.Next() {
-		a, err := scanAsset(rows)
-		if err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan asset", "error": err.Error()})
-			return
-		}
-		assets = append(assets, a)
+	result := make([]assetResponse, len(assets))
+	for i := range assets {
+		result[i] = assetToResponse(&assets[i])
 	}
 
-	c.JSON(http.StatusOK, assets)
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *AssetHandler) UpdateAsset(c *gin.Context) {
@@ -205,101 +221,79 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 
 	// Validate vendor_id if being updated
 	if req.VendorID != nil {
-		var exists bool
-		err := h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM vendors WHERE id = $1)", *req.VendorID).Scan(&exists)
-		if err != nil || !exists {
+		var count int64
+		h.GormDB.Model(&models.Vendor{}).Where("id = ?", *req.VendorID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Invalid vendor_id: %s. Vendor does not exist.", *req.VendorID)})
 			return
 		}
 	}
 
-	// Check asset exists
-	var exists bool
-	err = h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM assets WHERE id = $1)", assetID).Scan(&exists)
-	if err != nil || !exists {
+	var asset models.Asset
+	if err := h.GormDB.First(&asset, "id = ?", assetID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Asset not found"})
 		return
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
-
+	updates := map[string]interface{}{}
 	if req.AssetName != nil {
-		addClause("asset_name", *req.AssetName)
+		updates["asset_name"] = *req.AssetName
 	}
 	if req.Description != nil {
-		addClause("description", *req.Description)
+		updates["description"] = *req.Description
 	}
 	if req.OriginalCost != nil {
-		addClause("original_cost", *req.OriginalCost)
+		updates["original_cost"] = *req.OriginalCost
 	}
 	if req.SalvageValue != nil {
-		addClause("salvage_value", *req.SalvageValue)
+		updates["salvage_value"] = *req.SalvageValue
 	}
 	if req.UsefulLife != nil {
-		addClause("useful_life", *req.UsefulLife)
+		updates["useful_life"] = *req.UsefulLife
 	}
 	if req.InitialAccumulatedDepreciation != nil {
-		addClause("initial_accumulated_depreciation", *req.InitialAccumulatedDepreciation)
+		updates["initial_accumulated_depreciation"] = *req.InitialAccumulatedDepreciation
 	}
 	if req.AssetCategory != nil {
-		addClause("asset_category", *req.AssetCategory)
+		updates["asset_category"] = *req.AssetCategory
 	}
 	if req.FixedAssetAccount != nil {
-		addClause("fixed_asset_account", *req.FixedAssetAccount)
+		updates["fixed_asset_account"] = *req.FixedAssetAccount
 	}
 	if req.AccumulatedDepreciationAccount != nil {
-		addClause("accumulated_depreciation_account", *req.AccumulatedDepreciationAccount)
+		updates["accumulated_depreciation_account"] = *req.AccumulatedDepreciationAccount
 	}
 	if req.DepreciationExpenseAccount != nil {
-		addClause("depreciation_expense_account", *req.DepreciationExpenseAccount)
+		updates["depreciation_expense_account"] = *req.DepreciationExpenseAccount
 	}
 	if req.Method != nil {
-		addClause("method", *req.Method)
+		updates["method"] = *req.Method
 	}
 	if req.DepreciationFrequency != nil {
-		addClause("depreciation_frequency", *req.DepreciationFrequency)
+		updates["depreciation_frequency"] = *req.DepreciationFrequency
 	}
 	if req.DepreciationConvention != nil {
-		addClause("depreciation_convention", *req.DepreciationConvention)
+		updates["depreciation_convention"] = *req.DepreciationConvention
 	}
 	if req.AcquisitionDate != nil {
-		if t, err := time.Parse("2006-01-02", *req.AcquisitionDate); err == nil {
-			addClause("acquisition_date", t)
-		}
+		updates["acquisition_date"] = *req.AcquisitionDate
 	}
 	if req.StartDate != nil {
-		if t, err := time.Parse("2006-01-02", *req.StartDate); err == nil {
-			addClause("start_date", t)
-		}
+		updates["start_date"] = *req.StartDate
 	}
 	if req.EndDate != nil {
-		if t, err := time.Parse("2006-01-02", *req.EndDate); err == nil {
-			addClause("end_date", t)
-		}
+		updates["end_date"] = *req.EndDate
 	}
 	if req.Location != nil {
-		addClause("location", *req.Location)
+		updates["location"] = *req.Location
 	}
 	if req.VendorID != nil {
-		addClause("vendor_id", *req.VendorID)
+		updates["vendor_id"] = *req.VendorID
 	}
 
-	if len(setClauses) > 0 {
-		addClause("updated_at", time.Now().UTC())
-		args = append(args, assetID)
-		query := fmt.Sprintf("UPDATE assets SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err = h.DB.Exec(context.Background(), query, args...)
-		if err != nil {
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now().UTC()
+		if err := h.GormDB.Model(&asset).Updates(updates).Error; err != nil {
 			log.Printf("ERROR: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update asset", "error": err.Error()})
 			return
@@ -316,13 +310,13 @@ func (h *AssetHandler) DeleteAsset(c *gin.Context) {
 		return
 	}
 
-	tag, err := h.DB.Exec(context.Background(), "DELETE FROM assets WHERE id = $1", assetID)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete asset", "error": err.Error()})
+	result := h.GormDB.Delete(&models.Asset{}, "id = ?", assetID)
+	if result.Error != nil {
+		log.Printf("ERROR: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete asset", "error": result.Error.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Asset not found"})
 		return
 	}
@@ -331,54 +325,16 @@ func (h *AssetHandler) DeleteAsset(c *gin.Context) {
 }
 
 func (h *AssetHandler) getAssetByID(c *gin.Context, id int) {
-	row := h.DB.QueryRow(context.Background(),
-		`SELECT id, asset_name, description, original_cost, salvage_value, useful_life,
-		 initial_accumulated_depreciation, asset_category, fixed_asset_account, accumulated_depreciation_account,
-		 depreciation_expense_account, method, depreciation_frequency, depreciation_convention,
-		 acquisition_date, start_date, end_date, location, vendor_id, created_at, updated_at
-		 FROM assets WHERE id = $1`, id)
-
-	a, err := scanAssetRow(row)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "Asset not found"})
+	var asset models.Asset
+	if err := h.GormDB.First(&asset, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"detail": "Asset not found"})
+			return
+		}
+		log.Printf("ERROR: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query asset", "error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, a)
-}
-
-type scannable interface {
-	Scan(dest ...interface{}) error
-}
-
-func scanAsset(rows scannable) (assetResponse, error) {
-	return scanAssetRow(rows)
-}
-
-func scanAssetRow(row scannable) (assetResponse, error) {
-	var a assetResponse
-	var acqDate, startDate, endDate *time.Time
-
-	err := row.Scan(&a.ID, &a.AssetName, &a.Description, &a.OriginalCost, &a.SalvageValue, &a.UsefulLife,
-		&a.InitialAccumulatedDepreciation, &a.AssetCategory, &a.FixedAssetAccount, &a.AccumulatedDepreciationAccount,
-		&a.DepreciationExpenseAccount, &a.Method, &a.DepreciationFrequency, &a.DepreciationConvention,
-		&acqDate, &startDate, &endDate, &a.Location, &a.VendorID, &a.CreatedAt, &a.UpdatedAt)
-	if err != nil {
-		return a, err
-	}
-
-	if acqDate != nil {
-		s := acqDate.Format("2006-01-02")
-		a.AcquisitionDate = &s
-	}
-	if startDate != nil {
-		s := startDate.Format("2006-01-02")
-		a.StartDate = &s
-	}
-	if endDate != nil {
-		s := endDate.Format("2006-01-02")
-		a.EndDate = &s
-	}
-
-	return a, nil
+	c.JSON(http.StatusOK, assetToResponse(&asset))
 }

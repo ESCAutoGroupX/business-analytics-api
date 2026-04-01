@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -13,11 +12,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type AccountingHandler struct {
-	DB *pgxpool.Pool
+	GormDB *gorm.DB
 }
 
 type accountCreateRequest struct {
@@ -81,6 +82,36 @@ func validAccountTypesList() []string {
 	return keys
 }
 
+func acctToResponse(a *models.ChartOfAccount) accountResponse {
+	resp := accountResponse{
+		ID:                a.ID,
+		Code:              a.Code,
+		ParentID:          a.ParentID,
+		Name:              a.Name,
+		AccountType:       a.AccountType,
+		IsActive:          a.IsActive,
+		IsPartsVendor:     a.IsPartsVendor,
+		IsCogsVendor:      a.IsCogsVendor,
+		IsStatementVendor: a.IsStatementVendor,
+		CreatedAt:         a.CreatedAt,
+		UpdatedAt:         a.UpdatedAt,
+	}
+	if a.Description != nil {
+		resp.Description = *a.Description
+	}
+	if a.Location != nil {
+		resp.Location = gin.H{
+			"id": a.Location.ID, "location_name": a.Location.LocationName,
+			"address_line_1": a.Location.AddressLine1, "address_line_2": a.Location.AddressLine2,
+			"city": a.Location.City, "state_province": a.Location.StateProvince,
+			"postal_code": a.Location.PostalCode, "country": a.Location.Country,
+			"shop_id": a.Location.ShopID,
+			"created_at": a.Location.CreatedAt, "updated_at": a.Location.UpdatedAt,
+		}
+	}
+	return resp
+}
+
 func (h *AccountingHandler) requireAdmin(c *gin.Context) bool {
 	role, _ := c.Get("role")
 	if fmt.Sprintf("%v", role) != "Admin" {
@@ -103,19 +134,17 @@ func (h *AccountingHandler) CreateAccount(c *gin.Context) {
 	}
 
 	// Check duplicate code
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM chart_of_accounts WHERE code = $1)", req.Code).Scan(&exists)
-	if exists {
+	var count int64
+	h.GormDB.Model(&models.ChartOfAccount{}).Where("code = ?", req.Code).Count(&count)
+	if count > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Account with code '%s' already exists.", req.Code)})
 		return
 	}
 
 	// Validate parent_id
 	if req.ParentID != nil && *req.ParentID != "" {
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM chart_of_accounts WHERE id = $1)", *req.ParentID).Scan(&exists)
-		if !exists {
+		h.GormDB.Model(&models.ChartOfAccount{}).Where("id = ?", *req.ParentID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Parent account %s does not exist.", *req.ParentID)})
 			return
 		}
@@ -134,16 +163,12 @@ func (h *AccountingHandler) CreateAccount(c *gin.Context) {
 
 	// Validate location_id
 	if req.LocationID != nil {
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM locations WHERE id = $1)", *req.LocationID).Scan(&exists)
-		if !exists {
+		h.GormDB.Model(&models.Location{}).Where("id = ?", *req.LocationID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Location with id %d does not exist.", *req.LocationID)})
 			return
 		}
 	}
-
-	id := uuid.New().String()
-	now := time.Now().UTC()
 
 	isActive := true
 	if req.IsActive != nil {
@@ -162,19 +187,29 @@ func (h *AccountingHandler) CreateAccount(c *gin.Context) {
 		isStatementVendor = *req.IsStatementVendor
 	}
 
-	_, err := h.DB.Exec(context.Background(),
-		`INSERT INTO chart_of_accounts (id, code, description, parent_id, name, account_type, is_active, location_id, is_parts_vendor, is_cogs_vendor, is_statement_vendor, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-		id, req.Code, req.Description, req.ParentID, req.Name, accountType, isActive, req.LocationID,
-		isPartsVendor, isCogsVendor, isStatementVendor, now, now,
-	)
-	if err != nil {
+	desc := req.Description
+
+	acct := models.ChartOfAccount{
+		ID:                uuid.New().String(),
+		Code:              req.Code,
+		Description:       &desc,
+		ParentID:          req.ParentID,
+		Name:              req.Name,
+		AccountType:       &accountType,
+		IsActive:          &isActive,
+		LocationID:        req.LocationID,
+		IsPartsVendor:     &isPartsVendor,
+		IsCogsVendor:      &isCogsVendor,
+		IsStatementVendor: &isStatementVendor,
+	}
+
+	if err := h.GormDB.Create(&acct).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to create account", "error": err.Error()})
 		return
 	}
 
-	h.getAccountByID(c, id)
+	h.getAccountByID(c, acct.ID)
 }
 
 // GET /accounting/
@@ -182,10 +217,7 @@ func (h *AccountingHandler) ListAccounts(c *gin.Context) {
 	accountType := c.Query("account_type")
 	isActiveStr := c.DefaultQuery("is_active", "true")
 
-	query := `SELECT id, code, description, parent_id, name, account_type, is_active, location_id, is_parts_vendor, is_cogs_vendor, is_statement_vendor, created_at, updated_at
-	           FROM chart_of_accounts WHERE 1=1`
-	args := []interface{}{}
-	argIdx := 1
+	query := h.GormDB.Preload("Location")
 
 	if accountType != "" {
 		at := strings.ToLower(accountType)
@@ -193,41 +225,28 @@ func (h *AccountingHandler) ListAccounts(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Invalid account type: %s. Valid types are: %v", accountType, validAccountTypesList())})
 			return
 		}
-		query += fmt.Sprintf(" AND account_type = $%d", argIdx)
-		args = append(args, at)
-		argIdx++
+		query = query.Where("account_type = ?", at)
 	}
 
 	if isActiveStr == "true" {
-		query += fmt.Sprintf(" AND is_active = $%d", argIdx)
-		args = append(args, true)
-		argIdx++
+		query = query.Where("is_active = ?", true)
 	} else if isActiveStr == "false" {
-		query += fmt.Sprintf(" AND is_active = $%d", argIdx)
-		args = append(args, false)
-		argIdx++
+		query = query.Where("is_active = ?", false)
 	}
 
-	rows, err := h.DB.Query(context.Background(), query, args...)
-	if err != nil {
+	var accounts []models.ChartOfAccount
+	if err := query.Find(&accounts).Error; err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query accounts", "error": err.Error()})
 		return
 	}
-	defer rows.Close()
 
-	accounts := []accountResponse{}
-	for rows.Next() {
-		a, err := h.scanAccount(rows)
-		if err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to scan account", "error": err.Error()})
-			return
-		}
-		accounts = append(accounts, a)
+	result := make([]accountResponse, len(accounts))
+	for i := range accounts {
+		result[i] = acctToResponse(&accounts[i])
 	}
 
-	c.JSON(http.StatusOK, accounts)
+	c.JSON(http.StatusOK, result)
 }
 
 // GET /accounting/:account_id
@@ -247,10 +266,8 @@ func (h *AccountingHandler) UpdateAccount(c *gin.Context) {
 
 	accountID := c.Param("account_id")
 
-	var exists bool
-	h.DB.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM chart_of_accounts WHERE id = $1)", accountID).Scan(&exists)
-	if !exists {
+	var acct models.ChartOfAccount
+	if err := h.GormDB.First(&acct, "id = ?", accountID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Account not found"})
 		return
 	}
@@ -263,9 +280,9 @@ func (h *AccountingHandler) UpdateAccount(c *gin.Context) {
 
 	// Validate code uniqueness
 	if req.Code != nil {
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM chart_of_accounts WHERE code = $1 AND id != $2)", *req.Code, accountID).Scan(&exists)
-		if exists {
+		var count int64
+		h.GormDB.Model(&models.ChartOfAccount{}).Where("code = ? AND id != ?", *req.Code, accountID).Count(&count)
+		if count > 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Account with code '%s' already exists.", *req.Code)})
 			return
 		}
@@ -273,9 +290,9 @@ func (h *AccountingHandler) UpdateAccount(c *gin.Context) {
 
 	// Validate parent_id
 	if req.ParentID != nil && *req.ParentID != "" {
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM chart_of_accounts WHERE id = $1)", *req.ParentID).Scan(&exists)
-		if !exists {
+		var count int64
+		h.GormDB.Model(&models.ChartOfAccount{}).Where("id = ?", *req.ParentID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Parent account %s does not exist.", *req.ParentID)})
 			return
 		}
@@ -293,61 +310,49 @@ func (h *AccountingHandler) UpdateAccount(c *gin.Context) {
 
 	// Validate location_id
 	if req.LocationID != nil {
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM locations WHERE id = $1)", *req.LocationID).Scan(&exists)
-		if !exists {
+		var count int64
+		h.GormDB.Model(&models.Location{}).Where("id = ?", *req.LocationID).Count(&count)
+		if count == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"detail": fmt.Sprintf("Location with id %d does not exist.", *req.LocationID)})
 			return
 		}
 	}
 
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	addClause := func(col string, val interface{}) {
-		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argIdx))
-		args = append(args, val)
-		argIdx++
-	}
-
+	updates := map[string]interface{}{}
 	if req.Code != nil {
-		addClause("code", *req.Code)
+		updates["code"] = *req.Code
 	}
 	if req.Description != nil {
-		addClause("description", *req.Description)
+		updates["description"] = *req.Description
 	}
 	if req.ParentID != nil {
-		addClause("parent_id", *req.ParentID)
+		updates["parent_id"] = *req.ParentID
 	}
 	if req.Name != nil {
-		addClause("name", *req.Name)
+		updates["name"] = *req.Name
 	}
 	if req.AccountType != nil {
-		addClause("account_type", *req.AccountType)
+		updates["account_type"] = *req.AccountType
 	}
 	if req.IsActive != nil {
-		addClause("is_active", *req.IsActive)
+		updates["is_active"] = *req.IsActive
 	}
 	if req.LocationID != nil {
-		addClause("location_id", *req.LocationID)
+		updates["location_id"] = *req.LocationID
 	}
 	if req.IsPartsVendor != nil {
-		addClause("is_parts_vendor", *req.IsPartsVendor)
+		updates["is_parts_vendor"] = *req.IsPartsVendor
 	}
 	if req.IsCogsVendor != nil {
-		addClause("is_cogs_vendor", *req.IsCogsVendor)
+		updates["is_cogs_vendor"] = *req.IsCogsVendor
 	}
 	if req.IsStatementVendor != nil {
-		addClause("is_statement_vendor", *req.IsStatementVendor)
+		updates["is_statement_vendor"] = *req.IsStatementVendor
 	}
 
-	if len(setClauses) > 0 {
-		addClause("updated_at", time.Now().UTC())
-		args = append(args, accountID)
-		query := fmt.Sprintf("UPDATE chart_of_accounts SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
-		_, err := h.DB.Exec(context.Background(), query, args...)
-		if err != nil {
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now().UTC()
+		if err := h.GormDB.Model(&acct).Updates(updates).Error; err != nil {
 			log.Printf("ERROR: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update account", "error": err.Error()})
 			return
@@ -365,13 +370,13 @@ func (h *AccountingHandler) DeleteAccount(c *gin.Context) {
 
 	accountID := c.Param("account_id")
 
-	tag, err := h.DB.Exec(context.Background(), "DELETE FROM chart_of_accounts WHERE id = $1", accountID)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete account", "error": err.Error()})
+	result := h.GormDB.Delete(&models.ChartOfAccount{}, "id = ?", accountID)
+	if result.Error != nil {
+		log.Printf("ERROR: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete account", "error": result.Error.Error()})
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if result.RowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Account not found"})
 		return
 	}
@@ -425,7 +430,7 @@ func (h *AccountingHandler) ImportAccounts(c *gin.Context) {
 	}
 
 	inserted := 0
-	errors := []map[string]interface{}{}
+	importErrors := []map[string]interface{}{}
 
 	for _, row := range records[1:] {
 		code := ""
@@ -447,21 +452,20 @@ func (h *AccountingHandler) ImportAccounts(c *gin.Context) {
 		}
 
 		if code == "" || name == "" || typeRaw == "" {
-			errors = append(errors, map[string]interface{}{"row": row, "error": "Missing required fields."})
+			importErrors = append(importErrors, map[string]interface{}{"row": row, "error": "Missing required fields."})
 			continue
 		}
 
 		typeStr := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(typeRaw), " ", "_"), "-", "_")
 		if !validAccountTypes[typeStr] {
-			errors = append(errors, map[string]interface{}{"row": row, "error": fmt.Sprintf("Invalid account type: '%s' (normalized: '%s')", typeRaw, typeStr)})
+			importErrors = append(importErrors, map[string]interface{}{"row": row, "error": fmt.Sprintf("Invalid account type: '%s' (normalized: '%s')", typeRaw, typeStr)})
 			continue
 		}
 
 		// Check if already exists
-		var exists bool
-		h.DB.QueryRow(context.Background(),
-			"SELECT EXISTS(SELECT 1 FROM chart_of_accounts WHERE code = $1)", code).Scan(&exists)
-		if exists {
+		var count int64
+		h.GormDB.Model(&models.ChartOfAccount{}).Where("code = ?", code).Count(&count)
+		if count > 0 {
 			continue
 		}
 
@@ -469,73 +473,32 @@ func (h *AccountingHandler) ImportAccounts(c *gin.Context) {
 			description = name
 		}
 
-		id := uuid.New().String()
-		now := time.Now().UTC()
+		isActive := true
+		acct := models.ChartOfAccount{
+			ID:          uuid.New().String(),
+			Code:        code,
+			Name:        &name,
+			AccountType: &typeStr,
+			Description: &description,
+			IsActive:    &isActive,
+		}
 
-		_, err := h.DB.Exec(context.Background(),
-			`INSERT INTO chart_of_accounts (id, code, name, account_type, description, is_active, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, true, $6, $7)`,
-			id, code, name, typeStr, description, now, now,
-		)
-		if err != nil {
-			errors = append(errors, map[string]interface{}{"row": row, "error": err.Error()})
+		if err := h.GormDB.Create(&acct).Error; err != nil {
+			importErrors = append(importErrors, map[string]interface{}{"row": row, "error": err.Error()})
 			continue
 		}
 		inserted++
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "success", "inserted": inserted, "errors": errors})
-}
-
-type accountScannable interface {
-	Scan(dest ...interface{}) error
-}
-
-func (h *AccountingHandler) scanAccount(row accountScannable) (accountResponse, error) {
-	var a accountResponse
-	var locationID *int
-
-	err := row.Scan(&a.ID, &a.Code, &a.Description, &a.ParentID, &a.Name, &a.AccountType,
-		&a.IsActive, &locationID, &a.IsPartsVendor, &a.IsCogsVendor, &a.IsStatementVendor,
-		&a.CreatedAt, &a.UpdatedAt)
-	if err != nil {
-		return a, err
-	}
-
-	// Load location if present
-	if locationID != nil {
-		var locID int
-		var locName, addr1, city, state, postal, country string
-		var addr2 *string
-		var shopID *int
-		var locCreatedAt, locUpdatedAt *time.Time
-		lerr := h.DB.QueryRow(context.Background(),
-			`SELECT id, location_name, address_line_1, address_line_2, city, state_province, postal_code, country, shop_id, created_at, updated_at
-			 FROM locations WHERE id = $1`, *locationID,
-		).Scan(&locID, &locName, &addr1, &addr2, &city, &state, &postal, &country, &shopID, &locCreatedAt, &locUpdatedAt)
-		if lerr == nil {
-			a.Location = gin.H{
-				"id": locID, "location_name": locName, "address_line_1": addr1,
-				"address_line_2": addr2, "city": city, "state_province": state,
-				"postal_code": postal, "country": country, "shop_id": shopID,
-				"created_at": locCreatedAt, "updated_at": locUpdatedAt,
-			}
-		}
-	}
-
-	return a, nil
+	c.JSON(http.StatusOK, gin.H{"status": "success", "inserted": inserted, "errors": importErrors})
 }
 
 func (h *AccountingHandler) getAccountByID(c *gin.Context, id string) {
-	row := h.DB.QueryRow(context.Background(),
-		`SELECT id, code, description, parent_id, name, account_type, is_active, location_id, is_parts_vendor, is_cogs_vendor, is_statement_vendor, created_at, updated_at
-		 FROM chart_of_accounts WHERE id = $1`, id)
-
-	a, err := h.scanAccount(row)
-	if err != nil {
+	var acct models.ChartOfAccount
+	if err := h.GormDB.Preload("Location").First(&acct, "id = ?", id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"detail": fmt.Sprintf("Account with ID %s not found", id)})
 		return
 	}
 
-	c.JSON(http.StatusOK, a)
+	c.JSON(http.StatusOK, acctToResponse(&acct))
 }
