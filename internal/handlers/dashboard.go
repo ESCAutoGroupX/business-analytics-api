@@ -46,7 +46,7 @@ func (h *DashboardHandler) GetBankBalance(c *gin.Context) {
 		`SELECT id, COALESCE(title, ''), COALESCE(bank_name, ''),
 		        COALESCE(balance_available, 0), COALESCE(balance_current, 0),
 		        COALESCE(starting_credit_card_bal, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
+		 FROM payment_methods WHERE LOWER(method_type) = 'depository'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -105,7 +105,7 @@ func (h *DashboardHandler) GetPaymentMethod(c *gin.Context) {
 		        COALESCE(card_last_4_digits, ''),
 		        COALESCE(balance_available, 0), COALESCE(balance_current, 0),
 		        COALESCE(credit_limit, 0), COALESCE(starting_credit_card_bal, 0)
-		 FROM payment_methods WHERE method_type = 'CREDIT_CARD'
+		 FROM payment_methods WHERE LOWER(method_type) = 'credit_card'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -197,7 +197,7 @@ func (h *DashboardHandler) GetCreditCardBalanceList(c *gin.Context) {
 	sortOrder := c.DefaultQuery("sort_order", "desc")
 
 	// Get CREDIT_CARD accounts
-	pmWhere := "WHERE method_type = 'CREDIT_CARD'"
+	pmWhere := "WHERE LOWER(method_type) = 'credit_card'"
 	pmArgs := []interface{}{}
 	pmArgIdx := 1
 
@@ -351,7 +351,7 @@ func (h *DashboardHandler) GetBankBalanceTrans(c *gin.Context) {
 		`SELECT id, COALESCE(title, ''), COALESCE(bank_name, ''),
 		        COALESCE(balance_available, 0), COALESCE(balance_current, 0),
 		        COALESCE(starting_credit_card_bal, 0), COALESCE(minimum_balance, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
+		 FROM payment_methods WHERE LOWER(method_type) = 'depository'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -436,7 +436,7 @@ func (h *DashboardHandler) GetBankBalanceTrends(c *gin.Context) {
 
 	rows, err := h.DB.Query(ctx,
 		`SELECT id, COALESCE(title, ''), COALESCE(starting_credit_card_bal, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
+		 FROM payment_methods WHERE LOWER(method_type) = 'depository'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -546,7 +546,7 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 	// Get all DEPOSITORY account IDs and starting balances
 	pmRows, err := h.DB.Query(ctx,
 		`SELECT id, COALESCE(starting_credit_card_bal, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
+		 FROM payment_methods WHERE LOWER(method_type) = 'depository'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -825,7 +825,7 @@ func (h *DashboardHandler) GetCreditCardBalancesMonthly(c *gin.Context) {
 
 	rows, err := h.DB.Query(ctx,
 		`SELECT id, COALESCE(title, ''), COALESCE(starting_credit_card_bal, 0), COALESCE(minimum_balance, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
+		 FROM payment_methods WHERE LOWER(method_type) = 'depository'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -929,7 +929,7 @@ func (h *DashboardHandler) GetCreditCardBalancesWeekly(c *gin.Context) {
 
 	rows, err := h.DB.Query(ctx,
 		`SELECT id, COALESCE(title, ''), COALESCE(starting_credit_card_bal, 0), COALESCE(minimum_balance, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
+		 FROM payment_methods WHERE LOWER(method_type) = 'depository'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -1040,7 +1040,7 @@ func (h *DashboardHandler) GetCredit(c *gin.Context) {
 
 	rows, err := h.DB.Query(ctx,
 		`SELECT id, COALESCE(starting_credit_card_bal, 0)
-		 FROM payment_methods WHERE method_type = 'CREDIT_CARD'
+		 FROM payment_methods WHERE LOWER(method_type) = 'credit_card'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -1160,7 +1160,7 @@ func (h *DashboardHandler) GetCreditCardsDueSoon(c *gin.Context) {
 		        COALESCE(balance_current, 0), COALESCE(credit_limit, 0),
 		        next_payment_due_date
 		 FROM payment_methods
-		 WHERE method_type = 'CREDIT_CARD'
+		 WHERE LOWER(method_type) = 'credit_card'
 		   AND next_payment_due_date IS NOT NULL
 		   AND next_payment_due_date <= $1
 		 ORDER BY next_payment_due_date`, thirtyDaysLater)
@@ -1205,7 +1205,7 @@ func (h *DashboardHandler) GetLowBalanceAccount(c *gin.Context) {
 		`SELECT id, COALESCE(title, ''), COALESCE(bank_name, ''),
 		        COALESCE(balance_available, 0), COALESCE(balance_current, 0),
 		        COALESCE(starting_credit_card_bal, 0), COALESCE(minimum_balance, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
+		 FROM payment_methods WHERE LOWER(method_type) = 'depository'
 		 ORDER BY sorting_order, created_at`)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
@@ -1433,7 +1433,7 @@ func (h *DashboardHandler) GetItemsNeedAttention(c *gin.Context) {
 		`SELECT id, COALESCE(title, ''), COALESCE(card_name, ''),
 		        COALESCE(balance_current, 0), next_payment_due_date
 		 FROM payment_methods
-		 WHERE method_type = 'CREDIT_CARD'
+		 WHERE LOWER(method_type) = 'credit_card'
 		   AND next_payment_due_date IS NOT NULL
 		   AND next_payment_due_date <= $1
 		 ORDER BY next_payment_due_date`, thirtyDaysLater)
@@ -1461,7 +1461,7 @@ func (h *DashboardHandler) GetItemsNeedAttention(c *gin.Context) {
 	// 3. Lowest bank account (low balance)
 	pmRows, err := h.DB.Query(ctx,
 		`SELECT id, COALESCE(title, ''), COALESCE(starting_credit_card_bal, 0), COALESCE(minimum_balance, 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'
+		 FROM payment_methods WHERE LOWER(method_type) = 'depository'
 		 ORDER BY sorting_order, created_at`)
 	var lowestAccount gin.H
 	lowestBalance := math.MaxFloat64
