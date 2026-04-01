@@ -141,7 +141,7 @@ func pmToResponse(pm *models.PaymentMethod) paymentMethodResponse {
 
 func (h *PaymentMethodHandler) requireAdmin(c *gin.Context) bool {
 	role, _ := c.Get("role")
-	if fmt.Sprintf("%v", role) != "Admin" {
+	if !strings.EqualFold(fmt.Sprintf("%v", role), "admin") {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "Only admin can manage payment methods."})
 		return false
 	}

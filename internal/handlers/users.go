@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -337,7 +338,7 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 
 func (h *UserHandler) requireAdmin(c *gin.Context) bool {
 	role, _ := c.Get("role")
-	if fmt.Sprintf("%v", role) != "Admin" {
+	if !strings.EqualFold(fmt.Sprintf("%v", role), "admin") {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "Admin access required"})
 		return false
 	}

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -188,7 +189,7 @@ func (h *PayrollHandler) GetAllPayrolls(c *gin.Context) {
 	roleStr := fmt.Sprintf("%v", role)
 
 	query := h.GormDB.Model(&models.PayrollEntry{})
-	if roleStr != "Admin" {
+	if !strings.EqualFold(roleStr, "admin") {
 		query = query.Where("user_id = ?", uid)
 	}
 
@@ -307,7 +308,7 @@ func (h *PayrollHandler) DeletePayroll(c *gin.Context) {
 		return
 	}
 
-	if roleStr != "Admin" && (entry.UserID == nil || *entry.UserID != uid) {
+	if !strings.EqualFold(roleStr, "admin") && (entry.UserID == nil || *entry.UserID != uid) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You do not have permission to delete this payroll entry"})
 		return
 	}
@@ -366,7 +367,7 @@ func (h *PayrollHandler) ListAdjustments(c *gin.Context) {
 	roleStr := fmt.Sprintf("%v", role)
 
 	query := h.GormDB.Model(&models.PayrollAdjustment{})
-	if roleStr != "Admin" {
+	if !strings.EqualFold(roleStr, "admin") {
 		query = query.Where("user_id = ?", uid)
 	}
 
@@ -489,7 +490,7 @@ func (h *PayrollHandler) DeleteAdjustment(c *gin.Context) {
 		return
 	}
 
-	if roleStr != "Admin" && (adj.UserID == nil || *adj.UserID != uid) {
+	if !strings.EqualFold(roleStr, "admin") && (adj.UserID == nil || *adj.UserID != uid) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You do not have permission to delete this payroll adjustment"})
 		return
 	}

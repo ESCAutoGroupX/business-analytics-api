@@ -114,7 +114,7 @@ func acctToResponse(a *models.ChartOfAccount) accountResponse {
 
 func (h *AccountingHandler) requireAdmin(c *gin.Context) bool {
 	role, _ := c.Get("role")
-	if fmt.Sprintf("%v", role) != "Admin" {
+	if !strings.EqualFold(fmt.Sprintf("%v", role), "admin") {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "Admin access required"})
 		return false
 	}

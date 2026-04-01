@@ -126,7 +126,7 @@ func (h *TransactionHandler) ListTransactions(c *gin.Context) {
 	args := []interface{}{}
 	argIdx := 1
 
-	if roleStr != "Admin" {
+	if !strings.EqualFold(roleStr, "admin") {
 		where += fmt.Sprintf(" AND user_id = $%d", argIdx)
 		args = append(args, uid)
 		argIdx++
@@ -276,7 +276,7 @@ func (h *TransactionHandler) GetTransaction(c *gin.Context) {
 		return
 	}
 
-	if roleStr != "Admin" && (txUserID == nil || *txUserID != uid) {
+	if !strings.EqualFold(roleStr, "admin") && (txUserID == nil || *txUserID != uid) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You do not have permission to view this transaction"})
 		return
 	}
@@ -300,7 +300,7 @@ func (h *TransactionHandler) UpdateTransaction(c *gin.Context) {
 		return
 	}
 
-	if roleStr != "Admin" && (txUserID == nil || *txUserID != uid) {
+	if !strings.EqualFold(roleStr, "admin") && (txUserID == nil || *txUserID != uid) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You do not have permission to update this transaction"})
 		return
 	}
@@ -390,7 +390,7 @@ func (h *TransactionHandler) DeleteTransaction(c *gin.Context) {
 		return
 	}
 
-	if roleStr != "Admin" && (txUserID == nil || *txUserID != uid) {
+	if !strings.EqualFold(roleStr, "admin") && (txUserID == nil || *txUserID != uid) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You do not have permission to delete this transaction"})
 		return
 	}
@@ -496,7 +496,7 @@ func (h *TransactionHandler) UploadDocument(c *gin.Context) {
 		return
 	}
 
-	if roleStr != "Admin" && (txUserID == nil || *txUserID != uid) {
+	if !strings.EqualFold(roleStr, "admin") && (txUserID == nil || *txUserID != uid) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You do not have permission to upload documents for this transaction"})
 		return
 	}
