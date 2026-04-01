@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -13,10 +16,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type DashboardHandler struct {
 	GormDB *gorm.DB
+	Cfg    *config.Config
 }
 
 func (h *DashboardHandler) sqlDB() *sql.DB {
@@ -46,9 +53,30 @@ func BankBalance(c *gin.Context) {
 
 // GET /dashboard/bank-balance
 func (h *DashboardHandler) GetBankBalance(c *gin.Context) {
+	// Try to get live Plaid balances first
+	userID, _ := c.Get("user_id")
+	uid := fmt.Sprintf("%v", userID)
+
+	var user models.User
+	if err := h.GormDB.Select("plaid_access_token").First(&user, "id = ?", uid).Error; err == nil &&
+		user.PlaidAccessToken != nil && *user.PlaidAccessToken != "" &&
+		h.Cfg != nil && h.Cfg.PlaidClientID != "" && h.Cfg.PlaidSecret != "" {
+
+		plaidBalance, err := h.fetchPlaidDepositoryBalance(*user.PlaidAccessToken)
+		if err == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"totals": gin.H{
+					"total_balance_available": round2(plaidBalance),
+				},
+			})
+			return
+		}
+		log.Printf("GetBankBalance: Plaid balance fetch failed, falling back to local calc: %v", err)
+	}
+
+	// Fallback: compute from local data
 	ctx := context.Background()
 
-	// Get sum of starting balances from DEPOSITORY payment methods
 	var startingTotal float64
 	err := h.sqlDB().QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(starting_credit_card_bal), 0)
@@ -59,7 +87,6 @@ func (h *DashboardHandler) GetBankBalance(c *gin.Context) {
 		return
 	}
 
-	// Sum all depository transaction amounts
 	var txTotal float64
 	err = h.sqlDB().QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE account_type = 'depository'`).Scan(&txTotal)
@@ -76,6 +103,73 @@ func (h *DashboardHandler) GetBankBalance(c *gin.Context) {
 			"total_balance_available": totalBalance,
 		},
 	})
+}
+
+func (h *DashboardHandler) plaidBaseURL() string {
+	if h.Cfg == nil {
+		return "https://sandbox.plaid.com"
+	}
+	switch h.Cfg.PlaidEnv {
+	case "production":
+		return "https://production.plaid.com"
+	case "development":
+		return "https://development.plaid.com"
+	default:
+		return "https://sandbox.plaid.com"
+	}
+}
+
+func (h *DashboardHandler) fetchPlaidDepositoryBalance(accessToken string) (float64, error) {
+	payload := map[string]interface{}{
+		"client_id":    h.Cfg.PlaidClientID,
+		"secret":       h.Cfg.PlaidSecret,
+		"access_token": accessToken,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal Plaid request: %w", err)
+	}
+
+	resp, err := http.Post(h.plaidBaseURL()+"/accounts/balance/get", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return 0, fmt.Errorf("failed to call Plaid API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read Plaid response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return 0, fmt.Errorf("Plaid API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Accounts []struct {
+			AccountID string `json:"account_id"`
+			Balances  struct {
+				Available *float64 `json:"available"`
+				Current   *float64 `json:"current"`
+			} `json:"balances"`
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"accounts"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("failed to parse Plaid response: %w", err)
+	}
+
+	totalAvailable := 0.0
+	for _, acct := range result.Accounts {
+		if acct.Type == "depository" && acct.Balances.Available != nil {
+			totalAvailable += *acct.Balances.Available
+		}
+	}
+
+	return totalAvailable, nil
 }
 
 // GET /dashboard/payment-method

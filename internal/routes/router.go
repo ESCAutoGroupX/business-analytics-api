@@ -30,7 +30,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	transactionHandler := &handlers.TransactionHandler{GormDB: gormDB}
 	paybillHandler := &handlers.PayBillHandler{GormDB: gormDB}
 	tekmetricHandler := &handlers.TekmetricHandler{GormDB: gormDB, Cfg: cfg}
-	dashboardHandler := &handlers.DashboardHandler{GormDB: gormDB}
+	dashboardHandler := &handlers.DashboardHandler{GormDB: gormDB, Cfg: cfg}
 
 	// Public routes
 	r.GET("/health", handlers.Health)
