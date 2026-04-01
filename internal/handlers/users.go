@@ -59,10 +59,14 @@ type userOut struct {
 }
 
 func (h *UserHandler) scanUserOut(userID string) (*userOut, error) {
+	log.Printf("scanUserOut: looking up user with ID=%s", userID)
 	var user models.User
-	if err := h.GormDB.Preload("Locations").First(&user, "id = ?", userID).Error; err != nil {
-		return nil, err
+	result := h.GormDB.First(&user, "id = ?", userID)
+	if result.Error != nil {
+		log.Printf("scanUserOut: GORM error=%v, rows=%d", result.Error, result.RowsAffected)
+		return nil, result.Error
 	}
+	log.Printf("scanUserOut: found user email=%s", user.Email)
 
 	firstName := ""
 	if user.FirstName != nil {
