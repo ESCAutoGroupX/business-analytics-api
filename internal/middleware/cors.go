@@ -11,6 +11,7 @@ func CORS() gin.HandlerFunc {
 		"http://localhost:5173":                    true,
 		"https://businessanalyticsinc.com":         true,
 		"https://www.businessanalyticsinc.com":     true,
+		"https://d12s1zq4q2sj8a.cloudfront.net":    true,
 	}
 
 	return func(c *gin.Context) {
