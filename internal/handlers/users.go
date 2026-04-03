@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -20,6 +21,22 @@ type UserHandler struct {
 	GormDB *gorm.DB
 }
 
+// FlexIDs accepts both ["1","2"] and [1,2] from JSON
+type FlexIDs []string
+
+func (f *FlexIDs) UnmarshalJSON(data []byte) error {
+	var raw []interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	result := make([]string, len(raw))
+	for i, v := range raw {
+		result[i] = fmt.Sprintf("%v", v)
+	}
+	*f = result
+	return nil
+}
+
 type userCreateRequest struct {
 	Email        string   `json:"email" binding:"required"`
 	Password     string   `json:"password" binding:"required"`
@@ -27,7 +44,7 @@ type userCreateRequest struct {
 	LastName     string   `json:"last_name" binding:"required"`
 	MobileNumber string   `json:"mobile_number" binding:"required"`
 	Role         *string  `json:"role"`
-	LocationIDs  []string `json:"location_ids"`
+	LocationIDs  FlexIDs `json:"location_ids"`
 }
 
 type userUpdateRequest struct {
@@ -38,7 +55,7 @@ type userUpdateRequest struct {
 	MobileNumber *string  `json:"mobile_number"`
 	Role         *string  `json:"role"`
 	IsActive     *bool    `json:"is_active"`
-	LocationIDs  []string `json:"location_ids"`
+	LocationIDs  FlexIDs `json:"location_ids"`
 }
 
 type locationOut struct {
