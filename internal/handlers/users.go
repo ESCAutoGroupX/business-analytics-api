@@ -246,6 +246,7 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 	if req.Role != nil {
 		role = *req.Role
 	}
+	role = strings.ToUpper(role)
 
 	user := models.User{
 		ID:             uuid.New().String(),
@@ -378,7 +379,7 @@ func (h *UserHandler) applyUserUpdate(uid string, req *userUpdateRequest) error 
 		updates["mobile_number"] = *req.MobileNumber
 	}
 	if req.Role != nil {
-		updates["role"] = *req.Role
+		updates["role"] = strings.ToUpper(*req.Role)
 	}
 	if req.IsActive != nil {
 		updates["is_active"] = *req.IsActive
