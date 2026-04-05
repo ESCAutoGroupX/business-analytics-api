@@ -131,6 +131,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			plaid.POST("/fetch_transactions", plaidHandler.FetchTransactions)
 			plaid.GET("/sync_transactions", plaidHandler.SyncTransactions)
 			plaid.POST("/link-token", plaidHandler.CreateLinkToken)
+			plaid.GET("/items", plaidHandler.ListPlaidItems)
+			plaid.DELETE("/items/:id", plaidHandler.DeletePlaidItem)
 			plaid.POST("/sandbox/connect-bank", plaidHandler.SandboxConnectBank)
 		}
 

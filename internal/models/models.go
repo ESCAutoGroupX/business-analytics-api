@@ -40,6 +40,24 @@ type UserLocation struct {
 func (UserLocation) TableName() string { return "user_location_association" }
 
 // ──────────────────────────────────────────────
+// Plaid Items (multi-item support)
+// ──────────────────────────────────────────────
+
+type PlaidItem struct {
+	ID              int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID          string    `gorm:"column:user_id;not null" json:"user_id"`
+	ItemID          string    `gorm:"column:item_id;uniqueIndex;not null" json:"item_id"`
+	AccessToken     string    `gorm:"column:access_token;not null" json:"-"`
+	Cursor          string    `gorm:"column:cursor" json:"-"`
+	InstitutionID   string    `gorm:"column:institution_id" json:"institution_id"`
+	InstitutionName string    `gorm:"column:institution_name" json:"institution_name"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+func (PlaidItem) TableName() string { return "plaid_items" }
+
+// ──────────────────────────────────────────────
 // Vendors
 // ──────────────────────────────────────────────
 

@@ -3,12 +3,15 @@ package database
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 func Connect(databaseURL string) (*pgxpool.Pool, error) {
@@ -53,6 +56,11 @@ func ConnectGORM(databaseURL string) (*gorm.DB, error) {
 	sqlDB.SetMaxOpenConns(20)
 	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
+
+	// Auto-migrate plaid_items table
+	if err := db.AutoMigrate(&models.PlaidItem{}); err != nil {
+		log.Printf("WARN: AutoMigrate plaid_items: %v", err)
+	}
 
 	return db, nil
 }
