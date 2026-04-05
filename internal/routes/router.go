@@ -19,6 +19,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	assetHandler := &handlers.AssetHandler{GormDB: gormDB}
 	userHandler := &handlers.UserHandler{GormDB: gormDB}
 	plaidHandler := &handlers.PlaidHandler{GormDB: gormDB, Cfg: cfg}
+	cardAssignmentHandler := &handlers.CardAssignmentHandler{GormDB: gormDB}
 	paymentMethodHandler := &handlers.PaymentMethodHandler{GormDB: gormDB}
 	cardHandler := &handlers.CardHandler{GormDB: gormDB}
 	twoFAHandler := &handlers.TwoFactorAuthHandler{GormDB: gormDB, SecretKey: secretKey}
@@ -134,6 +135,15 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			plaid.GET("/items", plaidHandler.ListPlaidItems)
 			plaid.DELETE("/items/:id", plaidHandler.DeletePlaidItem)
 			plaid.POST("/sandbox/connect-bank", plaidHandler.SandboxConnectBank)
+		}
+
+		// Card Assignments
+		cardAssignments := protected.Group("/card-assignments")
+		{
+			cardAssignments.GET("/", cardAssignmentHandler.ListCardAssignments)
+			cardAssignments.POST("/", cardAssignmentHandler.CreateCardAssignment)
+			cardAssignments.PUT("/:id", cardAssignmentHandler.UpdateCardAssignment)
+			cardAssignments.DELETE("/:id", cardAssignmentHandler.DeleteCardAssignment)
 		}
 
 		// Payment Methods

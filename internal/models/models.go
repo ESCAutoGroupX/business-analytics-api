@@ -58,6 +58,23 @@ type PlaidItem struct {
 func (PlaidItem) TableName() string { return "plaid_items" }
 
 // ──────────────────────────────────────────────
+// Card Location Assignments
+// ──────────────────────────────────────────────
+
+type CardLocationAssignment struct {
+	ID             int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID         string    `gorm:"column:user_id;not null" json:"user_id"`
+	CardLast4      string    `gorm:"column:card_last4;not null" json:"card_last4"`
+	CardholderName string    `gorm:"column:cardholder_name" json:"cardholder_name"`
+	LocationName   string    `gorm:"column:location_name;not null" json:"location_name"`
+	PlaidAccountID string    `gorm:"column:plaid_account_id" json:"plaid_account_id"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+func (CardLocationAssignment) TableName() string { return "card_location_assignments" }
+
+// ──────────────────────────────────────────────
 // Vendors
 // ──────────────────────────────────────────────
 
