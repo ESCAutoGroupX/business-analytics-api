@@ -25,7 +25,7 @@ type XeroHandler struct {
 	Cfg    *config.Config
 }
 
-const xeroScopes = "openid profile email offline_access accounting.invoices accounting.payments accounting.banktransactions accounting.contacts accounting.settings accounting.reports.read accounting.manualjournals accounting.attachments accounting.budgets assets"
+const xeroScopes = "openid profile email offline_access accounting.contacts accounting.settings accounting.reports.read"
 
 // GET /xero/authorize?user_id=XXX — redirects to Xero OAuth consent screen
 func (h *XeroHandler) Authorize(c *gin.Context) {
