@@ -58,6 +58,25 @@ type PlaidItem struct {
 func (PlaidItem) TableName() string { return "plaid_items" }
 
 // ──────────────────────────────────────────────
+// Xero Connections
+// ──────────────────────────────────────────────
+
+type XeroConnection struct {
+	ID           int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID       string    `gorm:"column:user_id;not null" json:"user_id"`
+	TenantID     string    `gorm:"column:tenant_id;uniqueIndex;not null" json:"tenant_id"`
+	TenantName   string    `gorm:"column:tenant_name" json:"tenant_name"`
+	AccessToken  string    `gorm:"column:access_token;not null" json:"-"`
+	RefreshToken string    `gorm:"column:refresh_token;not null" json:"-"`
+	ExpiresAt    time.Time `gorm:"column:token_expires_at;not null" json:"expires_at"`
+	Scopes       string    `gorm:"column:scopes" json:"scopes"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (XeroConnection) TableName() string { return "xero_connections" }
+
+// ──────────────────────────────────────────────
 // Card Location Assignments
 // ──────────────────────────────────────────────
 

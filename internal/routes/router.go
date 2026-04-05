@@ -20,6 +20,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	userHandler := &handlers.UserHandler{GormDB: gormDB}
 	plaidHandler := &handlers.PlaidHandler{GormDB: gormDB, Cfg: cfg}
 	cardAssignmentHandler := &handlers.CardAssignmentHandler{GormDB: gormDB}
+	xeroHandler := &handlers.XeroHandler{GormDB: gormDB, Cfg: cfg}
 	paymentMethodHandler := &handlers.PaymentMethodHandler{GormDB: gormDB}
 	cardHandler := &handlers.CardHandler{GormDB: gormDB}
 	twoFAHandler := &handlers.TwoFactorAuthHandler{GormDB: gormDB, SecretKey: secretKey}
@@ -41,6 +42,13 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	r.POST("/auth/login-direct", authHandler.LoginDirect)
 	r.POST("/auth/forgot-password", authHandler.ForgotPassword)
 	r.POST("/auth/reset-password", authHandler.ResetPassword)
+
+	// Xero OAuth (public — no auth middleware, user initiates and Xero redirects back)
+	xero := r.Group("/xero")
+	{
+		xero.GET("/authorize", xeroHandler.Authorize)
+		xero.GET("/callback", xeroHandler.Callback)
+	}
 
 	// 2FA routes (public — used during login flow before token is issued)
 	twoFA := r.Group("/2fa")
@@ -136,6 +144,11 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			plaid.DELETE("/items/:id", plaidHandler.DeletePlaidItem)
 			plaid.POST("/sandbox/connect-bank", plaidHandler.SandboxConnectBank)
 		}
+
+		// Xero (authenticated)
+		protected.GET("/xero/connections", xeroHandler.ListConnections)
+		protected.DELETE("/xero/connections/:id", xeroHandler.DeleteConnection)
+		protected.POST("/xero/refresh", xeroHandler.RefreshToken)
 
 		// Card Assignments
 		cardAssignments := protected.Group("/card-assignments")

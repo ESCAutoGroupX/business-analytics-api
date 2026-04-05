@@ -18,7 +18,10 @@ type Config struct {
 	TekmetricClientSecret string
 	TekmetricBaseURL      string
 	TekmetricBase64AuthKey string
-	FrontendURL           string
+	FrontendURL            string
+	XeroClientID           string
+	XeroClientSecret       string
+	XeroRedirectURI        string
 }
 
 func Load() *Config {
@@ -42,6 +45,9 @@ func Load() *Config {
 		TekmetricClientSecret: os.Getenv("TEKMETRIC_CLIENT_SECRET"),
 		TekmetricBaseURL:      os.Getenv("TEKMETRIC_BASE_URL"),
 		TekmetricBase64AuthKey: os.Getenv("TEKMETRIC_BASE64_AUTH_KEY"),
-		FrontendURL:           os.Getenv("FRONTEND_URL"),
+		FrontendURL:            os.Getenv("FRONTEND_URL"),
+		XeroClientID:           os.Getenv("XERO_CLIENT_ID"),
+		XeroClientSecret:       os.Getenv("XERO_CLIENT_SECRET"),
+		XeroRedirectURI:        os.Getenv("XERO_REDIRECT_URI"),
 	}
 }
