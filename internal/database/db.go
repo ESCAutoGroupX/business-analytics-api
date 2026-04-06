@@ -58,7 +58,21 @@ func ConnectGORM(databaseURL string) (*gorm.DB, error) {
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 
 	// Auto-migrate tables
-	if err := db.AutoMigrate(&models.PlaidItem{}, &models.CardLocationAssignment{}, &models.XeroConnection{}); err != nil {
+	if err := db.AutoMigrate(
+		&models.PlaidItem{},
+		&models.CardLocationAssignment{},
+		&models.XeroConnection{},
+		&models.XeroBankTransaction{},
+		&models.XeroInvoice{},
+		&models.XeroContact{},
+		&models.XeroPayment{},
+		&models.XeroAsset{},
+		&models.XeroAssetType{},
+		&models.XeroJournal{},
+		&models.XeroTrackingCategory{},
+		&models.XeroSyncLog{},
+		&models.XeroReportCache{},
+	); err != nil {
 		log.Printf("WARN: AutoMigrate: %v", err)
 	}
 

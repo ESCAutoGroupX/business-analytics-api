@@ -21,6 +21,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	plaidHandler := &handlers.PlaidHandler{GormDB: gormDB, Cfg: cfg}
 	cardAssignmentHandler := &handlers.CardAssignmentHandler{GormDB: gormDB}
 	xeroHandler := &handlers.XeroHandler{GormDB: gormDB, Cfg: cfg}
+	xeroSyncHandler := &handlers.XeroSyncHandler{GormDB: gormDB, Cfg: cfg}
+	xeroAPIHandler := &handlers.XeroAPIHandler{GormDB: gormDB, Sync: xeroSyncHandler}
 	paymentMethodHandler := &handlers.PaymentMethodHandler{GormDB: gormDB}
 	cardHandler := &handlers.CardHandler{GormDB: gormDB}
 	twoFAHandler := &handlers.TwoFactorAuthHandler{GormDB: gormDB, SecretKey: secretKey}
@@ -149,6 +151,23 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		protected.GET("/xero/connections", xeroHandler.ListConnections)
 		protected.DELETE("/xero/connections/:id", xeroHandler.DeleteConnection)
 		protected.POST("/xero/refresh", xeroHandler.RefreshToken)
+
+		// Xero Sync
+		protected.POST("/xero/sync", xeroSyncHandler.TriggerSyncAll)
+		protected.POST("/xero/sync/:endpoint", xeroSyncHandler.TriggerSyncEndpoint)
+		protected.GET("/xero/sync-status", xeroSyncHandler.GetSyncStatus)
+
+		// Xero Data API
+		protected.GET("/xero/bank-transactions", xeroAPIHandler.ListBankTransactions)
+		protected.GET("/xero/invoices", xeroAPIHandler.ListInvoices)
+		protected.GET("/xero/contacts", xeroAPIHandler.ListContacts)
+		protected.GET("/xero/payments", xeroAPIHandler.ListPayments)
+		protected.GET("/xero/assets", xeroAPIHandler.ListAssets)
+		protected.GET("/xero/asset-types", xeroAPIHandler.ListAssetTypes)
+		protected.GET("/xero/journals", xeroAPIHandler.ListJournals)
+		protected.GET("/xero/tracking-categories", xeroAPIHandler.ListTrackingCategories)
+		protected.GET("/xero/reports/:type", xeroAPIHandler.GetReport)
+		protected.GET("/xero/match-transactions", xeroAPIHandler.MatchTransactions)
 
 		// Card Assignments
 		cardAssignments := protected.Group("/card-assignments")

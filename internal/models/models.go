@@ -1,6 +1,9 @@
 package models
 
 import (
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -483,3 +486,233 @@ type RolePermission struct {
 }
 
 func (RolePermission) TableName() string { return "role_permissions" }
+
+// ──────────────────────────────────────────────
+// JSONB helper type for PostgreSQL JSONB columns
+// ──────────────────────────────────────────────
+
+type JSONB json.RawMessage
+
+func (j JSONB) Value() (driver.Value, error) {
+	if len(j) == 0 {
+		return nil, nil
+	}
+	return string(j), nil
+}
+
+func (j *JSONB) Scan(value interface{}) error {
+	if value == nil {
+		*j = JSONB("null")
+		return nil
+	}
+	switch v := value.(type) {
+	case []byte:
+		*j = append((*j)[0:0], v...)
+	case string:
+		*j = JSONB(v)
+	default:
+		return fmt.Errorf("unsupported type for JSONB: %T", value)
+	}
+	return nil
+}
+
+func (j JSONB) MarshalJSON() ([]byte, error) {
+	if len(j) == 0 {
+		return []byte("null"), nil
+	}
+	return []byte(j), nil
+}
+
+func (j *JSONB) UnmarshalJSON(data []byte) error {
+	*j = append((*j)[0:0], data...)
+	return nil
+}
+
+func (JSONB) GormDataType() string { return "jsonb" }
+
+// ──────────────────────────────────────────────
+// Xero Synced Data
+// ──────────────────────────────────────────────
+
+type XeroBankTransaction struct {
+	ID              int        `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID          string     `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID        string     `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	Type            *string    `gorm:"column:type" json:"type"`
+	ContactID       *string    `gorm:"column:contact_id" json:"contact_id"`
+	ContactName     *string    `gorm:"column:contact_name" json:"contact_name"`
+	BankAccountID   *string    `gorm:"column:bank_account_id" json:"bank_account_id"`
+	BankAccountName *string    `gorm:"column:bank_account_name" json:"bank_account_name"`
+	Date            *time.Time `gorm:"column:date" json:"date"`
+	Reference       *string    `gorm:"column:reference" json:"reference"`
+	Status          *string    `gorm:"column:status" json:"status"`
+	SubTotal        *float64   `gorm:"column:sub_total" json:"sub_total"`
+	TotalTax        *float64   `gorm:"column:total_tax" json:"total_tax"`
+	Total           *float64   `gorm:"column:total" json:"total"`
+	IsReconciled    bool       `gorm:"column:is_reconciled;default:false" json:"is_reconciled"`
+	LineItems       JSONB      `gorm:"column:line_items" json:"line_items"`
+	UpdatedDateUTC  *time.Time `gorm:"column:updated_date_utc" json:"updated_date_utc"`
+	SyncedAt        time.Time  `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroBankTransaction) TableName() string { return "xero_bank_transactions" }
+
+type XeroInvoice struct {
+	ID             int        `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID         string     `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID       string     `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	Type           *string    `gorm:"column:type" json:"type"`
+	ContactID      *string    `gorm:"column:contact_id" json:"contact_id"`
+	ContactName    *string    `gorm:"column:contact_name" json:"contact_name"`
+	InvoiceNumber  *string    `gorm:"column:invoice_number" json:"invoice_number"`
+	Reference      *string    `gorm:"column:reference" json:"reference"`
+	Date           *time.Time `gorm:"column:date" json:"date"`
+	DueDate        *time.Time `gorm:"column:due_date" json:"due_date"`
+	Status         *string    `gorm:"column:status" json:"status"`
+	SubTotal       *float64   `gorm:"column:sub_total" json:"sub_total"`
+	TotalTax       *float64   `gorm:"column:total_tax" json:"total_tax"`
+	Total          *float64   `gorm:"column:total" json:"total"`
+	AmountDue      *float64   `gorm:"column:amount_due" json:"amount_due"`
+	AmountPaid     *float64   `gorm:"column:amount_paid" json:"amount_paid"`
+	AmountCredited *float64   `gorm:"column:amount_credited" json:"amount_credited"`
+	LineItems      JSONB      `gorm:"column:line_items" json:"line_items"`
+	UpdatedDateUTC *time.Time `gorm:"column:updated_date_utc" json:"updated_date_utc"`
+	SyncedAt       time.Time  `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroInvoice) TableName() string { return "xero_invoices" }
+
+type XeroContact struct {
+	ID             int        `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID         string     `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID       string     `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	Name           string     `gorm:"column:name;not null" json:"name"`
+	FirstName      *string    `gorm:"column:first_name" json:"first_name"`
+	LastName       *string    `gorm:"column:last_name" json:"last_name"`
+	Email          *string    `gorm:"column:email" json:"email"`
+	Phone          *string    `gorm:"column:phone" json:"phone"`
+	AccountNumber  *string    `gorm:"column:account_number" json:"account_number"`
+	TaxNumber      *string    `gorm:"column:tax_number" json:"tax_number"`
+	IsSupplier     bool       `gorm:"column:is_supplier;default:false" json:"is_supplier"`
+	IsCustomer     bool       `gorm:"column:is_customer;default:false" json:"is_customer"`
+	ContactStatus  *string    `gorm:"column:contact_status" json:"contact_status"`
+	UpdatedDateUTC *time.Time `gorm:"column:updated_date_utc" json:"updated_date_utc"`
+	SyncedAt       time.Time  `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroContact) TableName() string { return "xero_contacts" }
+
+type XeroPayment struct {
+	ID             int        `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID         string     `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID       string     `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	InvoiceID      *string    `gorm:"column:invoice_id" json:"invoice_id"`
+	AccountID      *string    `gorm:"column:account_id" json:"account_id"`
+	Date           *time.Time `gorm:"column:date" json:"date"`
+	Amount         *float64   `gorm:"column:amount" json:"amount"`
+	Reference      *string    `gorm:"column:reference" json:"reference"`
+	Status         *string    `gorm:"column:status" json:"status"`
+	PaymentType    *string    `gorm:"column:payment_type" json:"payment_type"`
+	UpdatedDateUTC *time.Time `gorm:"column:updated_date_utc" json:"updated_date_utc"`
+	SyncedAt       time.Time  `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroPayment) TableName() string { return "xero_payments" }
+
+type XeroAsset struct {
+	ID                       int        `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID                   string     `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID                 string     `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	AssetName                string     `gorm:"column:asset_name;not null" json:"asset_name"`
+	AssetNumber              *string    `gorm:"column:asset_number" json:"asset_number"`
+	AssetTypeID              *string    `gorm:"column:asset_type_id" json:"asset_type_id"`
+	AssetTypeName            *string    `gorm:"column:asset_type_name" json:"asset_type_name"`
+	Status                   *string    `gorm:"column:status" json:"status"`
+	PurchaseDate             *time.Time `gorm:"column:purchase_date" json:"purchase_date"`
+	PurchasePrice            *float64   `gorm:"column:purchase_price" json:"purchase_price"`
+	DisposalDate             *time.Time `gorm:"column:disposal_date" json:"disposal_date"`
+	DisposalPrice            *float64   `gorm:"column:disposal_price" json:"disposal_price"`
+	DepreciationMethod       *string    `gorm:"column:depreciation_method" json:"depreciation_method"`
+	AveragingMethod          *string    `gorm:"column:averaging_method" json:"averaging_method"`
+	DepreciationRate         *float64   `gorm:"column:depreciation_rate" json:"depreciation_rate"`
+	EffectiveLifeYears       *int       `gorm:"column:effective_life_years" json:"effective_life_years"`
+	CostLimit                *float64   `gorm:"column:cost_limit" json:"cost_limit"`
+	ResidualValue            *float64   `gorm:"column:residual_value" json:"residual_value"`
+	BookValue                *float64   `gorm:"column:book_value" json:"book_value"`
+	CurrentAccumDepreciation *float64   `gorm:"column:current_accum_depreciation" json:"current_accum_depreciation"`
+	PriorAccumDepreciation   *float64   `gorm:"column:prior_accum_depreciation" json:"prior_accum_depreciation"`
+	CurrentDepreciation      *float64   `gorm:"column:current_depreciation" json:"current_depreciation"`
+	UpdatedDateUTC           *time.Time `gorm:"column:updated_date_utc" json:"updated_date_utc"`
+	SyncedAt                 time.Time  `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroAsset) TableName() string { return "xero_assets" }
+
+type XeroAssetType struct {
+	ID                               int      `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID                           string   `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID                         string   `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	AssetTypeName                    string   `gorm:"column:asset_type_name;not null" json:"asset_type_name"`
+	FixedAssetAccountID              *string  `gorm:"column:fixed_asset_account_id" json:"fixed_asset_account_id"`
+	DepreciationExpenseAccountID     *string  `gorm:"column:depreciation_expense_account_id" json:"depreciation_expense_account_id"`
+	AccumulatedDepreciationAccountID *string  `gorm:"column:accumulated_depreciation_account_id" json:"accumulated_depreciation_account_id"`
+	DepreciationMethod               *string  `gorm:"column:depreciation_method" json:"depreciation_method"`
+	AveragingMethod                  *string  `gorm:"column:averaging_method" json:"averaging_method"`
+	DepreciationRate                 *float64 `gorm:"column:depreciation_rate" json:"depreciation_rate"`
+	EffectiveLifeYears               *int     `gorm:"column:effective_life_years" json:"effective_life_years"`
+	SyncedAt                         time.Time `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroAssetType) TableName() string { return "xero_asset_types" }
+
+type XeroJournal struct {
+	ID             int        `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID         string     `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID       string     `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	JournalDate    *time.Time `gorm:"column:journal_date" json:"journal_date"`
+	JournalNumber  *int       `gorm:"column:journal_number" json:"journal_number"`
+	SourceID       *string    `gorm:"column:source_id" json:"source_id"`
+	SourceType     *string    `gorm:"column:source_type" json:"source_type"`
+	Reference      *string    `gorm:"column:reference" json:"reference"`
+	JournalLines   JSONB      `gorm:"column:journal_lines" json:"journal_lines"`
+	CreatedDateUTC *time.Time `gorm:"column:created_date_utc" json:"created_date_utc"`
+	SyncedAt       time.Time  `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroJournal) TableName() string { return "xero_journals" }
+
+type XeroTrackingCategory struct {
+	ID       int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID   string    `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID string    `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	Name     string    `gorm:"column:name;not null" json:"name"`
+	Status   *string   `gorm:"column:status" json:"status"`
+	Options  JSONB     `gorm:"column:options" json:"options"`
+	SyncedAt time.Time `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroTrackingCategory) TableName() string { return "xero_tracking_categories" }
+
+type XeroSyncLog struct {
+	ID            int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	TenantID      string    `gorm:"column:tenant_id;not null" json:"tenant_id"`
+	Endpoint      string    `gorm:"column:endpoint;not null" json:"endpoint"`
+	LastSyncAt    time.Time `gorm:"column:last_sync_at;autoCreateTime" json:"last_sync_at"`
+	RecordsSynced int       `gorm:"column:records_synced;default:0" json:"records_synced"`
+	Status        string    `gorm:"column:status;default:'success'" json:"status"`
+	ErrorMessage  string    `gorm:"column:error_message" json:"error_message"`
+	CreatedAt     time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+}
+
+func (XeroSyncLog) TableName() string { return "xero_sync_log" }
+
+type XeroReportCache struct {
+	ID         int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	TenantID   string    `gorm:"column:tenant_id;not null;uniqueIndex:idx_xero_report_cache" json:"tenant_id"`
+	ReportType string    `gorm:"column:report_type;not null;uniqueIndex:idx_xero_report_cache" json:"report_type"`
+	Params     string    `gorm:"column:params;uniqueIndex:idx_xero_report_cache" json:"params"`
+	ReportData JSONB     `gorm:"column:report_data;not null" json:"report_data"`
+	CachedAt   time.Time `gorm:"column:cached_at;autoCreateTime" json:"cached_at"`
+}
+
+func (XeroReportCache) TableName() string { return "xero_reports_cache" }
