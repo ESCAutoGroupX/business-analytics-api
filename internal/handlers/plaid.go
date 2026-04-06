@@ -172,24 +172,23 @@ func (h *PlaidHandler) FetchTransactions(c *gin.Context) {
 		return
 	}
 
-	userID, _ := c.Get("user_id")
-	uid := fmt.Sprintf("%v", userID)
-
-	// Query all plaid_items for this user
+	// Query all plaid_items (company-wide — all users see the same transactions)
 	var items []models.PlaidItem
-	if err := h.GormDB.Where("user_id = ?", uid).Find(&items).Error; err != nil {
+	if err := h.GormDB.Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query plaid items"})
 		return
 	}
 
-	// Fallback: if no plaid_items, try legacy token from users table
+	// Fallback: if no plaid_items, try legacy tokens from users table
 	if len(items) == 0 {
-		var user models.User
-		if err := h.GormDB.Select("plaid_access_token").First(&user, "id = ?", uid).Error; err != nil || user.PlaidAccessToken == nil || *user.PlaidAccessToken == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"detail": "Plaid access token not found for the user"})
+		var users []models.User
+		if err := h.GormDB.Select("plaid_access_token").Where("plaid_access_token IS NOT NULL AND plaid_access_token != ''").Find(&users).Error; err != nil || len(users) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"detail": "No Plaid access tokens found"})
 			return
 		}
-		items = []models.PlaidItem{{AccessToken: *user.PlaidAccessToken}}
+		for _, u := range users {
+			items = append(items, models.PlaidItem{AccessToken: *u.PlaidAccessToken})
+		}
 	}
 
 	var allAccounts []interface{}
@@ -222,28 +221,27 @@ func (h *PlaidHandler) FetchTransactions(c *gin.Context) {
 
 // GET /plaid/sync_transactions
 func (h *PlaidHandler) SyncTransactions(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	uid := fmt.Sprintf("%v", userID)
-
-	// Query all plaid_items for this user
+	// Query all plaid_items (company-wide — all users see the same transactions)
 	var items []models.PlaidItem
-	if err := h.GormDB.Where("user_id = ?", uid).Find(&items).Error; err != nil {
+	if err := h.GormDB.Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query plaid items"})
 		return
 	}
 
-	// Fallback: if no plaid_items, try legacy token from users table
+	// Fallback: if no plaid_items, try legacy tokens from users table
 	if len(items) == 0 {
-		var user models.User
-		if err := h.GormDB.Select("plaid_access_token, plaid_cursor").First(&user, "id = ?", uid).Error; err != nil || user.PlaidAccessToken == nil || *user.PlaidAccessToken == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"detail": "Plaid access token not found for the user"})
+		var users []models.User
+		if err := h.GormDB.Select("id, plaid_access_token, plaid_cursor").Where("plaid_access_token IS NOT NULL AND plaid_access_token != ''").Find(&users).Error; err != nil || len(users) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"detail": "No Plaid access tokens found"})
 			return
 		}
-		cursor := ""
-		if user.PlaidCursor != nil {
-			cursor = *user.PlaidCursor
+		for _, u := range users {
+			cursor := ""
+			if u.PlaidCursor != nil {
+				cursor = *u.PlaidCursor
+			}
+			items = append(items, models.PlaidItem{UserID: fmt.Sprintf("%v", u.ID), AccessToken: *u.PlaidAccessToken, Cursor: cursor})
 		}
-		items = []models.PlaidItem{{AccessToken: *user.PlaidAccessToken, Cursor: cursor}}
 	}
 
 	var allAdded []interface{}
@@ -280,7 +278,7 @@ func (h *PlaidHandler) SyncTransactions(c *gin.Context) {
 				h.GormDB.Model(&items[i]).Update("cursor", newCursor)
 			} else {
 				// Legacy fallback — update users table
-				h.GormDB.Model(&models.User{}).Where("id = ?", uid).Update("plaid_cursor", newCursor)
+				h.GormDB.Model(&models.User{}).Where("id = ?", item.UserID).Update("plaid_cursor", newCursor)
 			}
 		}
 	}

@@ -53,25 +53,42 @@ func BankBalance(c *gin.Context) {
 
 // GET /dashboard/bank-balance
 func (h *DashboardHandler) GetBankBalance(c *gin.Context) {
-	// Try to get live Plaid balances first
-	userID, _ := c.Get("user_id")
-	uid := fmt.Sprintf("%v", userID)
+	// Try to get live Plaid balances from all connected items (company-wide)
+	if h.Cfg != nil && h.Cfg.PlaidClientID != "" && h.Cfg.PlaidSecret != "" {
+		var items []models.PlaidItem
+		h.GormDB.Find(&items)
 
-	var user models.User
-	if err := h.GormDB.Select("plaid_access_token").First(&user, "id = ?", uid).Error; err == nil &&
-		user.PlaidAccessToken != nil && *user.PlaidAccessToken != "" &&
-		h.Cfg != nil && h.Cfg.PlaidClientID != "" && h.Cfg.PlaidSecret != "" {
-
-		plaidBalance, err := h.fetchPlaidDepositoryBalance(*user.PlaidAccessToken)
-		if err == nil {
-			c.JSON(http.StatusOK, gin.H{
-				"totals": gin.H{
-					"total_balance_available": round2(plaidBalance),
-				},
-			})
-			return
+		// Fallback: try legacy tokens from users table
+		if len(items) == 0 {
+			var users []models.User
+			h.GormDB.Select("plaid_access_token").Where("plaid_access_token IS NOT NULL AND plaid_access_token != ''").Find(&users)
+			for _, u := range users {
+				items = append(items, models.PlaidItem{AccessToken: *u.PlaidAccessToken})
+			}
 		}
-		log.Printf("GetBankBalance: Plaid balance fetch failed, falling back to local calc: %v", err)
+
+		if len(items) > 0 {
+			totalBalance := 0.0
+			anySuccess := false
+			for _, item := range items {
+				balance, err := h.fetchPlaidDepositoryBalance(item.AccessToken)
+				if err == nil {
+					totalBalance += balance
+					anySuccess = true
+				} else {
+					log.Printf("GetBankBalance: Plaid balance fetch failed for item %s: %v", item.ItemID, err)
+				}
+			}
+			if anySuccess {
+				c.JSON(http.StatusOK, gin.H{
+					"totals": gin.H{
+						"total_balance_available": round2(totalBalance),
+					},
+				})
+				return
+			}
+			log.Printf("GetBankBalance: all Plaid balance fetches failed, falling back to local calc")
+		}
 	}
 
 	// Fallback: compute from local data
