@@ -251,6 +251,7 @@ func (h *XeroSyncHandler) SyncContacts(conn *models.XeroConnection) error {
 			h.logSync(conn.TenantID, "contacts", "error", totalSynced, err.Error())
 			return err
 		}
+		time.Sleep(1 * time.Second)
 
 		contacts, ok := result["Contacts"].([]interface{})
 		if !ok || len(contacts) == 0 {
@@ -316,6 +317,7 @@ func (h *XeroSyncHandler) SyncBankTransactions(conn *models.XeroConnection) erro
 			h.logSync(conn.TenantID, "bank-transactions", "error", totalSynced, err.Error())
 			return err
 		}
+		time.Sleep(1 * time.Second)
 
 		txns, ok := result["BankTransactions"].([]interface{})
 		if !ok || len(txns) == 0 {
@@ -389,6 +391,7 @@ func (h *XeroSyncHandler) SyncInvoices(conn *models.XeroConnection) error {
 			h.logSync(conn.TenantID, "invoices", "error", totalSynced, err.Error())
 			return err
 		}
+		time.Sleep(1 * time.Second)
 
 		invoices, ok := result["Invoices"].([]interface{})
 		if !ok || len(invoices) == 0 {
@@ -458,6 +461,7 @@ func (h *XeroSyncHandler) SyncPayments(conn *models.XeroConnection) error {
 			h.logSync(conn.TenantID, "payments", "error", totalSynced, err.Error())
 			return err
 		}
+		time.Sleep(1 * time.Second)
 
 		payments, ok := result["Payments"].([]interface{})
 		if !ok || len(payments) == 0 {
@@ -523,6 +527,7 @@ func (h *XeroSyncHandler) SyncManualJournals(conn *models.XeroConnection) error 
 			h.logSync(conn.TenantID, "journals", "error", totalSynced, err.Error())
 			return err
 		}
+		time.Sleep(1 * time.Second)
 
 		journals, ok := result["ManualJournals"].([]interface{})
 		if !ok || len(journals) == 0 {
@@ -570,6 +575,7 @@ func (h *XeroSyncHandler) SyncTrackingCategories(conn *models.XeroConnection) er
 		h.logSync(conn.TenantID, "tracking-categories", "error", 0, err.Error())
 		return err
 	}
+	time.Sleep(1 * time.Second)
 
 	categories, ok := result["TrackingCategories"].([]interface{})
 	if !ok {
@@ -617,6 +623,7 @@ func (h *XeroSyncHandler) SyncAssets(conn *models.XeroConnection) error {
 				log.Printf("WARN: failed to sync assets (status=%s): %v", status, err)
 				break
 			}
+			time.Sleep(1 * time.Second)
 
 			items, ok := result["items"].([]interface{})
 			if !ok || len(items) == 0 {
@@ -713,6 +720,7 @@ func (h *XeroSyncHandler) SyncAssetTypes(conn *models.XeroConnection) error {
 		h.logSync(conn.TenantID, "asset-types", "error", 0, err.Error())
 		return err
 	}
+	time.Sleep(1 * time.Second)
 
 	var assetTypes []interface{}
 	if err := json.Unmarshal(body, &assetTypes); err != nil {
@@ -780,9 +788,12 @@ func (h *XeroSyncHandler) SyncAll(conn *models.XeroConnection) {
 		{"asset-types", h.SyncAssetTypes},
 	}
 
-	for _, m := range methods {
+	for i, m := range methods {
 		if err := m.fn(conn); err != nil {
 			log.Printf("Xero sync %s failed: %v", m.name, err)
+		}
+		if i < len(methods)-1 {
+			time.Sleep(5 * time.Second)
 		}
 	}
 }
