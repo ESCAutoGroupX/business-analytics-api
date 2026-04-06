@@ -241,7 +241,7 @@ func (h *XeroAPIHandler) GetReport(c *gin.Context) {
 		return
 	}
 
-	conn, err := h.Sync.getActiveConnection()
+	conn, err := h.Sync.GetActiveConnection()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return

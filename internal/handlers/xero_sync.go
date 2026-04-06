@@ -100,7 +100,7 @@ func toJSON(v interface{}) models.JSONB {
 
 // ── Connection & Auth helpers ───────────────────────────────────
 
-func (h *XeroSyncHandler) getActiveConnection() (*models.XeroConnection, error) {
+func (h *XeroSyncHandler) GetActiveConnection() (*models.XeroConnection, error) {
 	var conn models.XeroConnection
 	if err := h.GormDB.Order("updated_at DESC").First(&conn).Error; err != nil {
 		return nil, fmt.Errorf("no xero connection found: %w", err)
@@ -131,6 +131,35 @@ func (h *XeroSyncHandler) getActiveConnection() (*models.XeroConnection, error) 
 	}
 
 	return &conn, nil
+}
+
+// refreshIfNeeded checks if the token expires within 5 minutes and refreshes if so.
+// Called mid-sync to prevent token expiry during long paginated syncs.
+func (h *XeroSyncHandler) refreshIfNeeded(conn *models.XeroConnection) error {
+	if time.Now().After(conn.ExpiresAt.Add(-5 * time.Minute)) {
+		tokenData, err := h.doRefreshToken(conn.RefreshToken)
+		if err != nil {
+			return fmt.Errorf("mid-sync token refresh failed: %w", err)
+		}
+
+		accessToken, _ := tokenData["access_token"].(string)
+		newRefresh, _ := tokenData["refresh_token"].(string)
+		expiresIn, _ := tokenData["expires_in"].(float64)
+
+		if accessToken == "" {
+			return fmt.Errorf("no access_token in mid-sync refresh response")
+		}
+
+		conn.AccessToken = accessToken
+		conn.RefreshToken = newRefresh
+		conn.ExpiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
+
+		if err := h.GormDB.Save(conn).Error; err != nil {
+			return fmt.Errorf("failed to save refreshed token: %w", err)
+		}
+		log.Printf("Mid-sync token refresh successful, new expiry: %v", conn.ExpiresAt)
+	}
+	return nil
 }
 
 func (h *XeroSyncHandler) doRefreshToken(refreshTok string) (map[string]interface{}, error) {
@@ -372,6 +401,11 @@ func (h *XeroSyncHandler) SyncBankTransactions(conn *models.XeroConnection) erro
 			break
 		}
 		page++
+		if page%25 == 0 {
+			if err := h.refreshIfNeeded(conn); err != nil {
+				log.Printf("WARN: bank-transactions mid-sync refresh failed: %v", err)
+			}
+		}
 	}
 
 	h.logSync(conn.TenantID, "bank-transactions", "success", totalSynced, "")
@@ -442,6 +476,11 @@ func (h *XeroSyncHandler) SyncInvoices(conn *models.XeroConnection) error {
 			break
 		}
 		page++
+		if page%25 == 0 {
+			if err := h.refreshIfNeeded(conn); err != nil {
+				log.Printf("WARN: invoices mid-sync refresh failed: %v", err)
+			}
+		}
 	}
 
 	h.logSync(conn.TenantID, "invoices", "success", totalSynced, "")
@@ -842,7 +881,7 @@ func (h *XeroSyncHandler) GetCachedOrFetchReport(tenantID, accessToken, reportTy
 
 // POST /xero/sync
 func (h *XeroSyncHandler) TriggerSyncAll(c *gin.Context) {
-	conn, err := h.getActiveConnection()
+	conn, err := h.GetActiveConnection()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return
@@ -854,7 +893,7 @@ func (h *XeroSyncHandler) TriggerSyncAll(c *gin.Context) {
 // POST /xero/sync/:endpoint
 func (h *XeroSyncHandler) TriggerSyncEndpoint(c *gin.Context) {
 	endpoint := c.Param("endpoint")
-	conn, err := h.getActiveConnection()
+	conn, err := h.GetActiveConnection()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return
