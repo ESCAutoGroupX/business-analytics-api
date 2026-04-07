@@ -73,6 +73,7 @@ func ConnectGORM(databaseURL string) (*gorm.DB, error) {
 		&models.XeroSyncLog{},
 		&models.XeroSyncState{},
 		&models.XeroReportCache{},
+		&models.ReconciliationOverride{},
 	); err != nil {
 		log.Printf("WARN: AutoMigrate: %v", err)
 	}

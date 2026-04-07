@@ -728,3 +728,15 @@ type XeroReportCache struct {
 }
 
 func (XeroReportCache) TableName() string { return "xero_reports_cache" }
+
+type ReconciliationOverride struct {
+	PlaidID       string    `gorm:"column:plaid_id;primaryKey" json:"plaid_id"`
+	VendorName    string    `gorm:"column:vendor_name" json:"vendor_name"`
+	GLAccountCode string    `gorm:"column:gl_account_code" json:"gl_account_code"`
+	Notes         string    `gorm:"column:notes" json:"notes"`
+	MatchStatus   string    `gorm:"column:match_status;default:unmatched" json:"match_status"`
+	UpdatedAt     time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	UpdatedBy     string    `gorm:"column:updated_by" json:"updated_by"`
+}
+
+func (ReconciliationOverride) TableName() string { return "xero_reconciliation_overrides" }

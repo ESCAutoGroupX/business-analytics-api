@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -474,12 +475,126 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 		})
 	}
 
+	// 5. Check overrides table — resolved overrides reduce the unmatched count
+	var overrides []models.ReconciliationOverride
+	h.GormDB.Find(&overrides)
+	overrideMap := map[string]models.ReconciliationOverride{}
+	for _, o := range overrides {
+		overrideMap[o.PlaidID] = o
+	}
+
+	resolved := 0
+	var finalUnmatched []unmatchedTxn
+	for _, ut := range unmatchedList {
+		if o, ok := overrideMap[ut.PlaidTxnID]; ok {
+			s := o.MatchStatus
+			if s == "manually_matched" || strings.HasPrefix(s, "excluded_") {
+				resolved++
+				continue
+			}
+		}
+		finalUnmatched = append(finalUnmatched, ut)
+	}
+
+	// Also count overrides for plaid IDs not in our top-50 list
+	for _, o := range overrides {
+		s := o.MatchStatus
+		if s == "manually_matched" || strings.HasPrefix(s, "excluded_") {
+			alreadyCounted := false
+			for _, ut := range unmatchedList {
+				if ut.PlaidTxnID == o.PlaidID {
+					alreadyCounted = true
+					break
+				}
+			}
+			if !alreadyCounted {
+				resolved++
+			}
+		}
+	}
+
+	adjustedUnmatched := unmatched - resolved
+	if adjustedUnmatched < 0 {
+		adjustedUnmatched = 0
+	}
+	adjustedTotal := matched + adjustedUnmatched
+	adjustedRate := float64(0)
+	if adjustedTotal > 0 {
+		adjustedRate = math.Round(float64(matched)/float64(adjustedTotal)*1000) / 10
+	}
+
+	// Enrich unmatched list with override data
+	type enrichedUnmatched struct {
+		Date        string  `json:"date"`
+		Amount      float64 `json:"amount"`
+		Description string  `json:"description"`
+		Account     string  `json:"account"`
+		PlaidTxnID  string  `json:"plaid_transaction_id"`
+		VendorName  string  `json:"vendor_name,omitempty"`
+		MatchStatus string  `json:"match_status,omitempty"`
+	}
+	var enrichedList []enrichedUnmatched
+	for _, ut := range finalUnmatched {
+		e := enrichedUnmatched{
+			Date: ut.Date, Amount: ut.Amount, Description: ut.Description,
+			Account: ut.Account, PlaidTxnID: ut.PlaidTxnID,
+		}
+		if o, ok := overrideMap[ut.PlaidTxnID]; ok {
+			e.VendorName = o.VendorName
+			e.MatchStatus = o.MatchStatus
+		}
+		enrichedList = append(enrichedList, e)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"total_plaid_transactions": total,
 		"matched":                 matched,
-		"unmatched":               unmatched,
-		"match_rate":              matchRate,
-		"unmatched_transactions":  unmatchedList,
+		"unmatched":               adjustedUnmatched,
+		"resolved":                resolved,
+		"match_rate":              adjustedRate,
+		"unmatched_transactions":  enrichedList,
 		"by_account":              byAccountList,
 	})
+}
+
+// POST /xero/reconciliation-override
+func (h *XeroAPIHandler) SaveReconciliationOverride(c *gin.Context) {
+	var req struct {
+		PlaidID       string `json:"plaid_id" binding:"required"`
+		VendorName    string `json:"vendor_name"`
+		GLAccountCode string `json:"gl_account_code"`
+		Notes         string `json:"notes"`
+		MatchStatus   string `json:"match_status"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "plaid_id is required"})
+		return
+	}
+
+	if req.MatchStatus == "" {
+		req.MatchStatus = "unmatched"
+	}
+
+	userID := ""
+	if uid, exists := c.Get("user_id"); exists {
+		userID = fmt.Sprintf("%v", uid)
+	}
+
+	override := models.ReconciliationOverride{
+		PlaidID:       req.PlaidID,
+		VendorName:    req.VendorName,
+		GLAccountCode: req.GLAccountCode,
+		Notes:         req.Notes,
+		MatchStatus:   req.MatchStatus,
+		UpdatedBy:     userID,
+	}
+
+	result := h.GormDB.Save(&override)
+	if result.Error != nil {
+		log.Printf("ERROR saving reconciliation override: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to save override"})
+		return
+	}
+
+	c.JSON(http.StatusOK, override)
 }
