@@ -598,3 +598,10 @@ func (h *XeroAPIHandler) SaveReconciliationOverride(c *gin.Context) {
 
 	c.JSON(http.StatusOK, override)
 }
+
+// GET /xero/reconciliation-overrides
+func (h *XeroAPIHandler) ListReconciliationOverrides(c *gin.Context) {
+	var overrides []models.ReconciliationOverride
+	h.GormDB.Order("updated_at DESC").Find(&overrides)
+	c.JSON(http.StatusOK, overrides)
+}

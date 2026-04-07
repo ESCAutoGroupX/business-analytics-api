@@ -171,6 +171,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		protected.GET("/xero/match-transactions", xeroAPIHandler.MatchTransactions)
 		protected.GET("/xero/reconciliation-summary", xeroAPIHandler.ReconciliationSummary)
 		protected.POST("/xero/reconciliation-override", xeroAPIHandler.SaveReconciliationOverride)
+		protected.GET("/xero/reconciliation-overrides", xeroAPIHandler.ListReconciliationOverrides)
 
 		// Card Assignments
 		cardAssignments := protected.Group("/card-assignments")
