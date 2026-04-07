@@ -150,9 +150,10 @@ func (h *UserHandler) EditMyProfile(c *gin.Context) {
 		return
 	}
 
-	// Users cannot update their own role or is_active
+	// Users cannot update their own role, is_active, or password via profile edit
 	req.Role = nil
 	req.IsActive = nil
+	req.Password = nil
 
 	if err := h.applyUserUpdate(uid, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
@@ -165,6 +166,45 @@ func (h *UserHandler) EditMyProfile(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, u)
+}
+
+// POST /users/me/change-password
+func (h *UserHandler) ChangePassword(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	uid := fmt.Sprintf("%v", userID)
+
+	var req struct {
+		CurrentPassword string `json:"current_password" binding:"required"`
+		NewPassword     string `json:"new_password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "current_password and new_password are required"})
+		return
+	}
+
+	var user models.User
+	if err := h.GormDB.First(&user, "id = ?", uid).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(req.CurrentPassword)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Current password is incorrect"})
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password"})
+		return
+	}
+
+	if err := h.GormDB.Model(&models.User{}).Where("id = ?", uid).Update("hashed_password", string(hashed)).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"detail": "Password changed successfully"})
 }
 
 // GET /users/
