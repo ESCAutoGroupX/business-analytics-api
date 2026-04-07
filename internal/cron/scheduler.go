@@ -10,12 +10,14 @@ import (
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/handlers"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/notifications"
 )
 
 // Start initializes and starts the Xero background sync scheduler.
 // All incremental syncs only fetch records changed since the last successful sync.
 func Start(gormDB *gorm.DB, cfg *config.Config) *cron.Cron {
 	h := &handlers.XeroSyncHandler{GormDB: gormDB, Cfg: cfg}
+	plaid := &handlers.PlaidHandler{GormDB: gormDB, Cfg: cfg}
 
 	c := cron.New()
 
@@ -34,9 +36,44 @@ func Start(gormDB *gorm.DB, cfg *config.Config) *cron.Cron {
 	// Daily at 2am: full resync — clears sync state and re-fetches everything
 	c.AddFunc("0 2 * * *", wrapSyncAll(h))
 
+	// Daily balance snapshot at 11pm
+	c.AddFunc("0 23 * * *", wrapSimpleJob("balance-snapshot", plaid.TakeDailyBalanceSnapshot))
+
+	// Email alerts
+	emailSender := &notifications.EmailSender{GormDB: gormDB, Cfg: cfg}
+	c.AddFunc("0 7 * * *", wrapSimpleJob("alert-overdue-bills", emailSender.CheckOverdueBills))
+	c.AddFunc("0 7 * * *", wrapSimpleJob("alert-low-balance", emailSender.CheckLowBankBalance))
+	c.AddFunc("0 7 * * 1", wrapSimpleJob("alert-reconciliation", emailSender.CheckReconciliationAlert))
+
 	c.Start()
-	log.Println("Xero sync cron scheduler started (incremental + rate-limited)")
+	log.Println("Cron scheduler started (sync + snapshots + alerts)")
+
+	// Run balance snapshot immediately on startup
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in startup balance snapshot: %v", r)
+			}
+		}()
+		log.Println("Running balance snapshot on startup...")
+		plaid.TakeDailyBalanceSnapshot()
+	}()
+
 	return c
+}
+
+// wrapSimpleJob wraps a no-arg function for cron
+func wrapSimpleJob(name string, fn func()) func() {
+	return func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in cron job %s: %v\n%s", name, r, debug.Stack())
+			}
+		}()
+		log.Printf("Cron %s: starting", name)
+		fn()
+		log.Printf("Cron %s: completed", name)
+	}
 }
 
 func wrapJob(h *handlers.XeroSyncHandler, name string, fn func(*models.XeroConnection) error) func() {

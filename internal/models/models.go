@@ -740,3 +740,21 @@ type ReconciliationOverride struct {
 }
 
 func (ReconciliationOverride) TableName() string { return "xero_reconciliation_overrides" }
+
+// ──────────────────────────────────────────────
+// Daily Balance Snapshots (Plaid)
+// ──────────────────────────────────────────────
+
+type DailyBalanceSnapshot struct {
+	ID               int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	AccountID        string    `gorm:"column:account_id;not null;uniqueIndex:idx_account_date" json:"account_id"`
+	AccountName      string    `gorm:"column:account_name" json:"account_name"`
+	InstitutionName  string    `gorm:"column:institution_name" json:"institution_name"`
+	AccountType      string    `gorm:"column:account_type" json:"account_type"`
+	CurrentBalance   *float64  `gorm:"column:current_balance" json:"current_balance"`
+	AvailableBalance *float64  `gorm:"column:available_balance" json:"available_balance"`
+	SnapshotDate     string    `gorm:"column:snapshot_date;not null;uniqueIndex:idx_account_date" json:"snapshot_date"`
+	CreatedAt        time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+}
+
+func (DailyBalanceSnapshot) TableName() string { return "daily_balance_snapshots" }

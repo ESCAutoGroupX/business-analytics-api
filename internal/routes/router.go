@@ -7,6 +7,7 @@ import (
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/handlers"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/middleware"
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/notifications"
 )
 
 func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Config) {
@@ -35,6 +36,9 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	paybillHandler := &handlers.PayBillHandler{GormDB: gormDB}
 	tekmetricHandler := &handlers.TekmetricHandler{GormDB: gormDB, Cfg: cfg}
 	dashboardHandler := &handlers.DashboardHandler{GormDB: gormDB, Cfg: cfg}
+	notificationHandler := &handlers.NotificationHandler{
+		Email: &notifications.EmailSender{GormDB: gormDB, Cfg: cfg},
+	}
 
 	// Public routes
 	r.GET("/health", handlers.Health)
@@ -147,7 +151,11 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			plaid.DELETE("/items/:id", plaidHandler.DeletePlaidItem)
 			plaid.POST("/sandbox/connect-bank", plaidHandler.SandboxConnectBank)
 			plaid.GET("/balance-history", plaidHandler.BalanceHistory)
+			plaid.POST("/snapshot-now", plaidHandler.TriggerSnapshot)
 		}
+
+		// Notifications
+		protected.POST("/notifications/test-email", notificationHandler.TestEmail)
 
 		// Xero (authenticated)
 		protected.GET("/xero/connections", xeroHandler.ListConnections)

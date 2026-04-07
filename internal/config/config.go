@@ -22,6 +22,11 @@ type Config struct {
 	XeroClientID           string
 	XeroClientSecret       string
 	XeroRedirectURI        string
+	SMTPHost               string
+	SMTPPort               string
+	SMTPUser               string
+	SMTPPass               string
+	SMTPFrom               string
 }
 
 func Load() *Config {
@@ -49,5 +54,10 @@ func Load() *Config {
 		XeroClientID:           os.Getenv("XERO_CLIENT_ID"),
 		XeroClientSecret:       os.Getenv("XERO_CLIENT_SECRET"),
 		XeroRedirectURI:        os.Getenv("XERO_REDIRECT_URI"),
+		SMTPHost:               os.Getenv("SMTP_HOST"),
+		SMTPPort:               os.Getenv("SMTP_PORT"),
+		SMTPUser:               os.Getenv("SMTP_USER"),
+		SMTPPass:               os.Getenv("SMTP_PASS"),
+		SMTPFrom:               os.Getenv("SMTP_FROM"),
 	}
 }
