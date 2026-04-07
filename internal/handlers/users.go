@@ -340,14 +340,30 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 
 	uid := c.Param("user_id")
 
-	result := h.GormDB.Delete(&models.User{}, "id = ?", uid)
-	if result.Error != nil {
-		log.Printf("ERROR: %v", result.Error)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete user", "error": result.Error.Error()})
+	var count int64
+	h.GormDB.Model(&models.User{}).Where("id = ?", uid).Count(&count)
+	if count == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
 		return
 	}
-	if result.RowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
+
+	// Try hard delete inside a transaction so junction cleanup is rolled back on failure
+	txErr := h.GormDB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", uid).Delete(&models.UserLocation{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&models.User{}, "id = ?", uid).Error
+	})
+
+	if txErr != nil {
+		// FK constraint from other tables — soft delete instead
+		log.Printf("Hard delete failed for user %s, deactivating: %v", uid, txErr)
+		if err := h.GormDB.Model(&models.User{}).Where("id = ?", uid).Update("is_active", false).Error; err != nil {
+			log.Printf("ERROR deactivating user %s: %v", uid, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to delete user"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"detail": "Cannot delete user with existing records. User has been deactivated instead."})
 		return
 	}
 
