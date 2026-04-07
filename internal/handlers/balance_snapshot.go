@@ -14,7 +14,7 @@ import (
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
-// TakeDailyBalanceSnapshot fetches live Plaid balances and backfills from transactions.
+// TakeDailyBalanceSnapshot fetches live Plaid balances and reconstructs history.
 func (h *PlaidHandler) TakeDailyBalanceSnapshot() {
 	today := time.Now().Format("2006-01-02")
 	log.Printf("Balance snapshot: starting for %s", today)
@@ -66,11 +66,12 @@ func (h *PlaidHandler) TakeDailyBalanceSnapshot() {
 				CurrentBalance:   currentBal,
 				AvailableBalance: availBal,
 				SnapshotDate:     today,
+				Source:           "plaid",
 			}
 
 			h.GormDB.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "account_id"}, {Name: "snapshot_date"}},
-				DoUpdates: clause.AssignmentColumns([]string{"account_name", "institution_name", "account_type", "current_balance", "available_balance"}),
+				DoUpdates: clause.AssignmentColumns([]string{"account_name", "institution_name", "account_type", "current_balance", "available_balance", "source"}),
 			}).Create(&snap)
 			liveCount++
 		}
@@ -78,60 +79,167 @@ func (h *PlaidHandler) TakeDailyBalanceSnapshot() {
 
 	log.Printf("Balance snapshot: %d live balances saved", liveCount)
 
-	// 2. Backfill from transactions table (last 90 days)
-	h.backfillFromTransactions()
+	// 2. Reconstruct historical daily balances from posted transactions
+	h.ReconstructDailyBalances()
 }
 
-func (h *PlaidHandler) backfillFromTransactions() {
-	cutoff := time.Now().AddDate(0, 0, -90).Format("2006-01-02")
+// ReconstructDailyBalances rebuilds historical daily balances by walking
+// backwards from each account's current Plaid balance through posted
+// (non-pending) transactions, reversing each one to compute what the
+// balance was on each prior day.
+func (h *PlaidHandler) ReconstructDailyBalances() {
+	today := time.Now().Format("2006-01-02")
+	log.Println("Balance reconstruction: starting")
 
-	// Get the most recent transaction per account per day that has a balance
-	type dailyRow struct {
-		AccountID        string   `gorm:"column:account_id"`
-		AccountName      string   `gorm:"column:account_name"`
-		AccountType      string   `gorm:"column:account_type"`
-		Date             string   `gorm:"column:date"`
-		CurrentBalance   *float64 `gorm:"column:current_balance"`
-		AvailableBalance *float64 `gorm:"column:available_balance"`
+	var items []models.PlaidItem
+	h.GormDB.Find(&items)
+
+	type acctInfo struct {
+		ID              string
+		Name            string
+		Type            string
+		InstitutionName string
+		Balance         float64
 	}
+	var accts []acctInfo
 
-	var rows []dailyRow
-	h.GormDB.Raw(`
-		SELECT DISTINCT ON (account_id, date)
-			account_id, account_name, account_type,
-			TO_CHAR(date, 'YYYY-MM-DD') as date,
-			current_balance, available_balance
-		FROM transactions
-		WHERE date >= ? AND (current_balance IS NOT NULL OR available_balance IS NOT NULL)
-		ORDER BY account_id, date, transaction_datetime DESC NULLS LAST, created_at DESC
-	`, cutoff).Scan(&rows)
-
-	backfilled := 0
-	for _, r := range rows {
-		if r.AccountID == "" || r.Date == "" {
+	for _, item := range items {
+		result, err := h.plaidRequest("/accounts/balance/get", map[string]interface{}{
+			"access_token": item.AccessToken,
+		})
+		if err != nil {
+			log.Printf("Balance reconstruction: Plaid error for item %s: %v", item.ItemID, err)
 			continue
 		}
 
-		snap := models.DailyBalanceSnapshot{
-			AccountID:        r.AccountID,
-			AccountName:      r.AccountName,
-			AccountType:      r.AccountType,
-			CurrentBalance:   r.CurrentBalance,
-			AvailableBalance: r.AvailableBalance,
-			SnapshotDate:     r.Date,
+		accounts, ok := result["accounts"].([]interface{})
+		if !ok {
+			continue
 		}
 
-		// Only insert if no snapshot exists yet (don't overwrite live Plaid data)
-		result := h.GormDB.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "account_id"}, {Name: "snapshot_date"}},
-			DoNothing: true,
-		}).Create(&snap)
-		if result.RowsAffected > 0 {
-			backfilled++
+		for _, a := range accounts {
+			acct, ok := a.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			acctID, _ := acct["account_id"].(string)
+			acctName, _ := acct["name"].(string)
+			acctType, _ := acct["type"].(string)
+
+			// Skip loan accounts — not enough transaction history
+			if acctType == "loan" {
+				log.Printf("Balance reconstruction: skipping loan account %s", acctName)
+				continue
+			}
+
+			var bal float64
+			if balances, ok := acct["balances"].(map[string]interface{}); ok {
+				if v, ok := balances["current"].(float64); ok {
+					bal = v
+				}
+			}
+
+			accts = append(accts, acctInfo{
+				ID:              acctID,
+				Name:            acctName,
+				Type:            acctType,
+				InstitutionName: item.InstitutionName,
+				Balance:         bal,
+			})
 		}
 	}
 
-	log.Printf("Balance snapshot: %d days backfilled from transactions", backfilled)
+	log.Printf("Balance reconstruction: %d accounts to process", len(accts))
+
+	totalDays := 0
+	for _, acct := range accts {
+		// Pull all POSTED transactions (pending=false) for this account
+		type txnRow struct {
+			Date   string  `gorm:"column:date"`
+			Amount float64 `gorm:"column:amount"`
+		}
+		var txns []txnRow
+		h.GormDB.Raw(`
+			SELECT TO_CHAR(date, 'YYYY-MM-DD') as date, amount
+			FROM transactions
+			WHERE account_id = ? AND pending = false
+			  AND amount IS NOT NULL AND date IS NOT NULL
+			ORDER BY date DESC, transaction_datetime DESC NULLS LAST, created_at DESC
+		`, acct.ID).Scan(&txns)
+
+		if len(txns) == 0 {
+			log.Printf("Balance reconstruction: %s — no posted transactions, skipping", acct.Name)
+			continue
+		}
+
+		// Walk backwards from today's known balance.
+		// Plaid sign convention:
+		//   positive amount = money left account (debit)
+		//   negative amount = money entered account (credit)
+		// Going backwards (undoing a transaction):
+		//   running_balance += amount
+		// This works for both signs:
+		//   debit:  running + positive = higher (balance was higher before money left)
+		//   credit: running + negative = lower  (balance was lower before money entered)
+		running := acct.Balance
+		currentDate := today
+		dateBalances := map[string]float64{today: running}
+
+		for _, txn := range txns {
+			if txn.Date != currentDate {
+				// Crossed date boundary — running is end-of-day for txn.Date
+				dateBalances[txn.Date] = running
+				currentDate = txn.Date
+			}
+			running += txn.Amount
+		}
+		// running is now the balance before the earliest transaction date
+
+		earliestDate := currentDate
+		earliest, _ := time.Parse("2006-01-02", earliestDate)
+		todayTime, _ := time.Parse("2006-01-02", today)
+
+		// Build snapshots walking forward, carrying forward for gap days
+		var snapshots []models.DailyBalanceSnapshot
+		lastBal := running // balance before earliest date
+
+		for d := earliest; !d.After(todayTime); d = d.AddDate(0, 0, 1) {
+			ds := d.Format("2006-01-02")
+			if b, ok := dateBalances[ds]; ok {
+				lastBal = b
+			}
+			// Skip today — live Plaid balance already saved by TakeDailyBalanceSnapshot
+			if ds == today {
+				continue
+			}
+			bal := lastBal
+			snapshots = append(snapshots, models.DailyBalanceSnapshot{
+				AccountID:       acct.ID,
+				AccountName:     acct.Name,
+				InstitutionName: acct.InstitutionName,
+				AccountType:     acct.Type,
+				CurrentBalance:  &bal,
+				SnapshotDate:    ds,
+				Source:          "reconstructed",
+			})
+		}
+
+		if len(snapshots) > 0 {
+			res := h.GormDB.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "account_id"}, {Name: "snapshot_date"}},
+				DoUpdates: clause.AssignmentColumns([]string{"current_balance", "account_name", "institution_name", "account_type", "source"}),
+			}).CreateInBatches(&snapshots, 100)
+			if res.Error != nil {
+				log.Printf("Balance reconstruction: %s — upsert error: %v", acct.Name, res.Error)
+			}
+		}
+
+		totalDays += len(snapshots)
+		log.Printf("Balance reconstruction: %s — %d days (%s to %s), current balance: %.2f",
+			acct.Name, len(snapshots), earliestDate, today, acct.Balance)
+	}
+
+	log.Printf("Balance reconstruction: completed — %d total snapshot days", totalDays)
 }
 
 // GET /plaid/balance-history?days=30|from=YYYY-MM-DD&to=YYYY-MM-DD|ytd=true|all=true

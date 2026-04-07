@@ -754,6 +754,7 @@ type DailyBalanceSnapshot struct {
 	CurrentBalance   *float64  `gorm:"column:current_balance" json:"current_balance"`
 	AvailableBalance *float64  `gorm:"column:available_balance" json:"available_balance"`
 	SnapshotDate     string    `gorm:"column:snapshot_date;not null;uniqueIndex:idx_account_date" json:"snapshot_date"`
+	Source           string    `gorm:"column:source" json:"source"`
 	CreatedAt        time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 }
 
