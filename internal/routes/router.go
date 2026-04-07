@@ -132,6 +132,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			users.POST("/", userHandler.CreateUser)
 			users.GET("/:user_id", userHandler.GetUser)
 			users.PATCH("/:user_id", userHandler.PatchUser)
+			users.POST("/:user_id/reset-password", userHandler.ResetUserPassword)
 			users.DELETE("/:user_id", userHandler.DeleteUser)
 		}
 

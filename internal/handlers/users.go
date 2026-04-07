@@ -372,6 +372,43 @@ func (h *UserHandler) DeleteUser(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// POST /users/:user_id/reset-password
+func (h *UserHandler) ResetUserPassword(c *gin.Context) {
+	if !h.requireAdmin(c) {
+		return
+	}
+
+	uid := c.Param("user_id")
+
+	var count int64
+	h.GormDB.Model(&models.User{}).Where("id = ?", uid).Count(&count)
+	if count == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "User not found"})
+		return
+	}
+
+	var req struct {
+		Password string `json:"password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "password is required"})
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password"})
+		return
+	}
+
+	if err := h.GormDB.Model(&models.User{}).Where("id = ?", uid).Update("hashed_password", string(hashed)).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to reset password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"detail": "Password reset successfully"})
+}
+
 func (h *UserHandler) requireAdmin(c *gin.Context) bool {
 	role, _ := c.Get("role")
 	if !strings.EqualFold(fmt.Sprintf("%v", role), "admin") {
