@@ -706,6 +706,18 @@ type XeroSyncLog struct {
 
 func (XeroSyncLog) TableName() string { return "xero_sync_log" }
 
+type XeroSyncState struct {
+	Endpoint           string     `gorm:"column:endpoint;primaryKey" json:"endpoint"`
+	LastSyncAt         *time.Time `gorm:"column:last_sync_at" json:"last_sync_at"`
+	LastSuccessfulAt   *time.Time `gorm:"column:last_successful_at" json:"last_successful_at"`
+	TotalRecordsSynced int        `gorm:"column:total_records_synced;default:0" json:"total_records_synced"`
+	DailyCallCount     int        `gorm:"column:daily_call_count;default:0" json:"daily_call_count"`
+	DailyCallDate      *time.Time `gorm:"column:daily_call_date" json:"daily_call_date"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+}
+
+func (XeroSyncState) TableName() string { return "xero_sync_state" }
+
 type XeroReportCache struct {
 	ID         int       `gorm:"primaryKey;autoIncrement" json:"id"`
 	TenantID   string    `gorm:"column:tenant_id;not null;uniqueIndex:idx_xero_report_cache" json:"tenant_id"`

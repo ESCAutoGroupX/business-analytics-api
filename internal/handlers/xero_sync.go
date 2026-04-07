@@ -19,6 +19,7 @@ import (
 
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/xero"
 )
 
 type XeroSyncHandler struct {
@@ -201,9 +202,45 @@ func (h *XeroSyncHandler) doRefreshToken(refreshTok string) (map[string]interfac
 	return result, nil
 }
 
+// ── Incremental sync helpers ───────────────────────────────────
+
+// incrementalFilter returns a Xero where clause to only fetch records
+// updated since the last successful sync. Returns "" for first-time syncs.
+func (h *XeroSyncHandler) incrementalFilter(endpoint string) string {
+	var state models.XeroSyncState
+	if err := h.GormDB.Where("endpoint = ?", endpoint).First(&state).Error; err != nil {
+		return ""
+	}
+	if state.LastSuccessfulAt == nil {
+		return ""
+	}
+	t := state.LastSuccessfulAt.UTC()
+	return fmt.Sprintf("UpdatedDateUTC>=DateTime(%d,%d,%d,%d,%d,%d)",
+		t.Year(), int(t.Month()), t.Day(), t.Hour(), t.Minute(), t.Second())
+}
+
+// updateSyncState records a successful sync completion for incremental tracking.
+func (h *XeroSyncHandler) updateSyncState(endpoint string, recordsSynced int) {
+	now := time.Now()
+	state := models.XeroSyncState{
+		Endpoint:           endpoint,
+		LastSyncAt:         &now,
+		LastSuccessfulAt:   &now,
+		TotalRecordsSynced: recordsSynced,
+	}
+	h.GormDB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "endpoint"}},
+		DoUpdates: clause.AssignmentColumns([]string{"last_sync_at", "last_successful_at", "total_records_synced", "updated_at"}),
+	}).Create(&state)
+}
+
 // ── Xero API helpers ────────────────────────────────────────────
 
 func (h *XeroSyncHandler) xeroGetRaw(rawURL, accessToken, tenantID string) ([]byte, error) {
+	if !xero.GetRateLimiter().WaitForSlot() {
+		return nil, fmt.Errorf("daily API limit approaching (4800 calls), sync paused")
+	}
+
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -270,17 +307,20 @@ func (h *XeroSyncHandler) logSync(tenantID, endpoint, status string, count int, 
 // ── Sync: Contacts ──────────────────────────────────────────────
 
 func (h *XeroSyncHandler) SyncContacts(conn *models.XeroConnection) error {
+	whereClause := h.incrementalFilter("contacts")
 	totalSynced := 0
 	page := 1
 
 	for {
 		endpoint := fmt.Sprintf("Contacts?page=%d", page)
+		if whereClause != "" {
+			endpoint += "&where=" + url.QueryEscape(whereClause)
+		}
 		result, err := h.xeroAPIGet(conn.AccessToken, conn.TenantID, endpoint)
 		if err != nil {
 			h.logSync(conn.TenantID, "contacts", "error", totalSynced, err.Error())
 			return err
 		}
-		time.Sleep(1 * time.Second)
 
 		contacts, ok := result["Contacts"].([]interface{})
 		if !ok || len(contacts) == 0 {
@@ -329,6 +369,7 @@ func (h *XeroSyncHandler) SyncContacts(conn *models.XeroConnection) error {
 		page++
 	}
 
+	h.updateSyncState("contacts", totalSynced)
 	h.logSync(conn.TenantID, "contacts", "success", totalSynced, "")
 	return nil
 }
@@ -336,17 +377,20 @@ func (h *XeroSyncHandler) SyncContacts(conn *models.XeroConnection) error {
 // ── Sync: BankTransactions ──────────────────────────────────────
 
 func (h *XeroSyncHandler) SyncBankTransactions(conn *models.XeroConnection) error {
+	whereClause := h.incrementalFilter("bank-transactions")
 	totalSynced := 0
 	page := 1
 
 	for {
 		endpoint := fmt.Sprintf("BankTransactions?page=%d", page)
+		if whereClause != "" {
+			endpoint += "&where=" + url.QueryEscape(whereClause)
+		}
 		result, err := h.xeroAPIGet(conn.AccessToken, conn.TenantID, endpoint)
 		if err != nil {
 			h.logSync(conn.TenantID, "bank-transactions", "error", totalSynced, err.Error())
 			return err
 		}
-		time.Sleep(1 * time.Second)
 
 		txns, ok := result["BankTransactions"].([]interface{})
 		if !ok || len(txns) == 0 {
@@ -408,6 +452,7 @@ func (h *XeroSyncHandler) SyncBankTransactions(conn *models.XeroConnection) erro
 		}
 	}
 
+	h.updateSyncState("bank-transactions", totalSynced)
 	h.logSync(conn.TenantID, "bank-transactions", "success", totalSynced, "")
 	return nil
 }
@@ -415,17 +460,20 @@ func (h *XeroSyncHandler) SyncBankTransactions(conn *models.XeroConnection) erro
 // ── Sync: Invoices ──────────────────────────────────────────────
 
 func (h *XeroSyncHandler) SyncInvoices(conn *models.XeroConnection) error {
+	whereClause := h.incrementalFilter("invoices")
 	totalSynced := 0
 	page := 1
 
 	for {
 		endpoint := fmt.Sprintf("Invoices?page=%d", page)
+		if whereClause != "" {
+			endpoint += "&where=" + url.QueryEscape(whereClause)
+		}
 		result, err := h.xeroAPIGet(conn.AccessToken, conn.TenantID, endpoint)
 		if err != nil {
 			h.logSync(conn.TenantID, "invoices", "error", totalSynced, err.Error())
 			return err
 		}
-		time.Sleep(1 * time.Second)
 
 		invoices, ok := result["Invoices"].([]interface{})
 		if !ok || len(invoices) == 0 {
@@ -483,6 +531,7 @@ func (h *XeroSyncHandler) SyncInvoices(conn *models.XeroConnection) error {
 		}
 	}
 
+	h.updateSyncState("invoices", totalSynced)
 	h.logSync(conn.TenantID, "invoices", "success", totalSynced, "")
 	return nil
 }
@@ -490,17 +539,20 @@ func (h *XeroSyncHandler) SyncInvoices(conn *models.XeroConnection) error {
 // ── Sync: Payments ──────────────────────────────────────────────
 
 func (h *XeroSyncHandler) SyncPayments(conn *models.XeroConnection) error {
+	whereClause := h.incrementalFilter("payments")
 	totalSynced := 0
 	page := 1
 
 	for {
 		endpoint := fmt.Sprintf("Payments?page=%d", page)
+		if whereClause != "" {
+			endpoint += "&where=" + url.QueryEscape(whereClause)
+		}
 		result, err := h.xeroAPIGet(conn.AccessToken, conn.TenantID, endpoint)
 		if err != nil {
 			h.logSync(conn.TenantID, "payments", "error", totalSynced, err.Error())
 			return err
 		}
-		time.Sleep(1 * time.Second)
 
 		payments, ok := result["Payments"].([]interface{})
 		if !ok || len(payments) == 0 {
@@ -549,6 +601,7 @@ func (h *XeroSyncHandler) SyncPayments(conn *models.XeroConnection) error {
 		page++
 	}
 
+	h.updateSyncState("payments", totalSynced)
 	h.logSync(conn.TenantID, "payments", "success", totalSynced, "")
 	return nil
 }
@@ -556,17 +609,20 @@ func (h *XeroSyncHandler) SyncPayments(conn *models.XeroConnection) error {
 // ── Sync: ManualJournals ────────────────────────────────────────
 
 func (h *XeroSyncHandler) SyncManualJournals(conn *models.XeroConnection) error {
+	whereClause := h.incrementalFilter("journals")
 	totalSynced := 0
 	page := 1
 
 	for {
 		endpoint := fmt.Sprintf("ManualJournals?page=%d", page)
+		if whereClause != "" {
+			endpoint += "&where=" + url.QueryEscape(whereClause)
+		}
 		result, err := h.xeroAPIGet(conn.AccessToken, conn.TenantID, endpoint)
 		if err != nil {
 			h.logSync(conn.TenantID, "journals", "error", totalSynced, err.Error())
 			return err
 		}
-		time.Sleep(1 * time.Second)
 
 		journals, ok := result["ManualJournals"].([]interface{})
 		if !ok || len(journals) == 0 {
@@ -602,6 +658,7 @@ func (h *XeroSyncHandler) SyncManualJournals(conn *models.XeroConnection) error 
 		page++
 	}
 
+	h.updateSyncState("journals", totalSynced)
 	h.logSync(conn.TenantID, "journals", "success", totalSynced, "")
 	return nil
 }
@@ -614,7 +671,7 @@ func (h *XeroSyncHandler) SyncTrackingCategories(conn *models.XeroConnection) er
 		h.logSync(conn.TenantID, "tracking-categories", "error", 0, err.Error())
 		return err
 	}
-	time.Sleep(1 * time.Second)
+
 
 	categories, ok := result["TrackingCategories"].([]interface{})
 	if !ok {
@@ -644,6 +701,7 @@ func (h *XeroSyncHandler) SyncTrackingCategories(conn *models.XeroConnection) er
 		totalSynced++
 	}
 
+	h.updateSyncState("tracking-categories", totalSynced)
 	h.logSync(conn.TenantID, "tracking-categories", "success", totalSynced, "")
 	return nil
 }
@@ -662,7 +720,7 @@ func (h *XeroSyncHandler) SyncAssets(conn *models.XeroConnection) error {
 				log.Printf("WARN: failed to sync assets (status=%s): %v", status, err)
 				break
 			}
-			time.Sleep(1 * time.Second)
+		
 
 			items, ok := result["items"].([]interface{})
 			if !ok || len(items) == 0 {
@@ -759,7 +817,7 @@ func (h *XeroSyncHandler) SyncAssetTypes(conn *models.XeroConnection) error {
 		h.logSync(conn.TenantID, "asset-types", "error", 0, err.Error())
 		return err
 	}
-	time.Sleep(1 * time.Second)
+
 
 	var assetTypes []interface{}
 	if err := json.Unmarshal(body, &assetTypes); err != nil {
@@ -810,7 +868,12 @@ func (h *XeroSyncHandler) SyncAssetTypes(conn *models.XeroConnection) error {
 
 // ── SyncAll ─────────────────────────────────────────────────────
 
-func (h *XeroSyncHandler) SyncAll(conn *models.XeroConnection) {
+func (h *XeroSyncHandler) SyncAll(conn *models.XeroConnection, fullResync bool) {
+	if fullResync {
+		h.GormDB.Where("1 = 1").Delete(&models.XeroSyncState{})
+		log.Println("Full resync: cleared xero_sync_state for complete re-fetch")
+	}
+
 	type syncMethod struct {
 		name string
 		fn   func(*models.XeroConnection) error
@@ -828,11 +891,13 @@ func (h *XeroSyncHandler) SyncAll(conn *models.XeroConnection) {
 	}
 
 	for i, m := range methods {
+		log.Printf("SyncAll: starting %s (fullResync=%v, apiCallsToday=%d)",
+			m.name, fullResync, xero.GetRateLimiter().CallsToday())
 		if err := m.fn(conn); err != nil {
 			log.Printf("Xero sync %s failed: %v", m.name, err)
 		}
 		if i < len(methods)-1 {
-			time.Sleep(5 * time.Second)
+			time.Sleep(2 * time.Second)
 		}
 	}
 }
@@ -886,7 +951,7 @@ func (h *XeroSyncHandler) TriggerSyncAll(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return
 	}
-	go h.SyncAll(conn)
+	go h.SyncAll(conn, false)
 	c.JSON(http.StatusOK, gin.H{"status": "started"})
 }
 
