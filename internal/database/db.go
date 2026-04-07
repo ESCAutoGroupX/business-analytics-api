@@ -57,8 +57,8 @@ func ConnectGORM(databaseURL string) (*gorm.DB, error) {
 	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 
-	// Auto-migrate tables
-	if err := db.AutoMigrate(
+	// Auto-migrate tables (split into batches so one failure doesn't block others)
+	for _, model := range []interface{}{
 		&models.PlaidItem{},
 		&models.CardLocationAssignment{},
 		&models.XeroConnection{},
@@ -74,8 +74,10 @@ func ConnectGORM(databaseURL string) (*gorm.DB, error) {
 		&models.XeroSyncState{},
 		&models.XeroReportCache{},
 		&models.ReconciliationOverride{},
-	); err != nil {
-		log.Printf("WARN: AutoMigrate: %v", err)
+	} {
+		if err := db.AutoMigrate(model); err != nil {
+			log.Printf("WARN: AutoMigrate %T: %v", model, err)
+		}
 	}
 
 	return db, nil
