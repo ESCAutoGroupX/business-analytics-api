@@ -98,7 +98,8 @@ func (h *PlaidHandler) backfillFromTransactions() {
 	var rows []dailyRow
 	h.GormDB.Raw(`
 		SELECT DISTINCT ON (account_id, date)
-			account_id, account_name, account_type, date,
+			account_id, account_name, account_type,
+			TO_CHAR(date, 'YYYY-MM-DD') as date,
 			current_balance, available_balance
 		FROM transactions
 		WHERE date >= ? AND (current_balance IS NOT NULL OR available_balance IS NOT NULL)
@@ -182,7 +183,8 @@ func (h *PlaidHandler) BalanceHistory(c *gin.Context) {
 	var txnRows []balanceRow
 	h.GormDB.Raw(`
 		SELECT DISTINCT ON (account_id, date)
-			account_id, account_name, account_type, date,
+			account_id, account_name, account_type,
+			TO_CHAR(date, 'YYYY-MM-DD') as date,
 			current_balance, available_balance
 		FROM transactions
 		WHERE date >= ? AND date <= ?
@@ -365,7 +367,8 @@ func (h *PlaidHandler) BalanceHistory(c *gin.Context) {
 				var priorRow balanceRow
 				result := h.GormDB.Raw(`
 					SELECT DISTINCT ON (account_id)
-						account_id, account_name, account_type, date,
+						account_id, account_name, account_type,
+						TO_CHAR(date, 'YYYY-MM-DD') as date,
 						current_balance, available_balance
 					FROM transactions
 					WHERE date < ? AND account_id IN ?
