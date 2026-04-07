@@ -169,6 +169,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		protected.GET("/xero/tracking-categories", xeroAPIHandler.ListTrackingCategories)
 		protected.GET("/xero/reports/:type", xeroAPIHandler.GetReport)
 		protected.GET("/xero/match-transactions", xeroAPIHandler.MatchTransactions)
+		protected.GET("/xero/reconciliation-summary", xeroAPIHandler.ReconciliationSummary)
 
 		// Card Assignments
 		cardAssignments := protected.Group("/card-assignments")
