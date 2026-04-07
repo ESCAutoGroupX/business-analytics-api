@@ -188,21 +188,62 @@ func (h *UserHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 
+	log.Printf("Change password: user %s (%s) requesting password change", user.Email, uid)
+
 	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(req.CurrentPassword)); err != nil {
+		log.Printf("Change password: current password verification FAILED for %s", user.Email)
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Current password is incorrect"})
 		return
 	}
+	log.Printf("Change password: current password verified for %s", user.Email)
 
+	log.Printf("Change password: hashing new password for user %s", user.Email)
 	hashed, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
+		log.Printf("Change password: hash generation FAILED for %s: %v", user.Email, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password"})
 		return
 	}
+	hashStr := string(hashed)
+	log.Printf("Change password: hash result first 10 chars: %s", hashStr[:10])
+	log.Printf("Change password: hash length: %d", len(hashStr))
 
-	if err := h.GormDB.Model(&models.User{}).Where("id = ?", uid).Update("hashed_password", string(hashed)).Error; err != nil {
+	// Pre-save verification: confirm the hash matches the new password
+	if err := bcrypt.CompareHashAndPassword(hashed, []byte(req.NewPassword)); err != nil {
+		log.Printf("Change password: CRITICAL — hash does not match new password BEFORE save for %s: %v", user.Email, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Password hash verification failed before save"})
+		return
+	}
+	log.Printf("Change password: pre-save hash verification passed")
+
+	log.Printf("Change password: saving to DB for %s", user.Email)
+	if err := h.GormDB.Model(&models.User{}).Where("id = ?", uid).Update("hashed_password", hashStr).Error; err != nil {
+		log.Printf("Change password: DB update FAILED for %s: %v", user.Email, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update password"})
 		return
 	}
+	log.Printf("Change password: DB update succeeded for %s", user.Email)
+
+	// Post-save verification: read back from DB and confirm
+	var verify models.User
+	if err := h.GormDB.First(&verify, "id = ?", uid).Error; err != nil {
+		log.Printf("Change password: post-save read FAILED for %s: %v", user.Email, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Password save verification failed — could not read back"})
+		return
+	}
+	log.Printf("Change password: read-back hash first 10 chars: %s", verify.HashedPassword[:10])
+	if verify.HashedPassword != hashStr {
+		log.Printf("Change password: CRITICAL — saved hash does not match for %s! wrote=%s… got=%s…",
+			user.Email, hashStr[:20], verify.HashedPassword[:20])
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Password save verification failed — hash mismatch after save"})
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(verify.HashedPassword), []byte(req.NewPassword)); err != nil {
+		log.Printf("Change password: CRITICAL — read-back hash fails bcrypt compare for %s: %v", user.Email, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Password save verification failed"})
+		return
+	}
+	log.Printf("Change password: post-save verification PASSED for %s", user.Email)
 
 	c.JSON(http.StatusOK, gin.H{"detail": "Password changed successfully"})
 }
@@ -435,16 +476,35 @@ func (h *UserHandler) ResetUserPassword(c *gin.Context) {
 		return
 	}
 
+	log.Printf("Reset password: admin resetting password for user %s", uid)
 	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
+		log.Printf("Reset password: hash generation FAILED for %s: %v", uid, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to hash password"})
 		return
 	}
+	hashStr := string(hashed)
+	log.Printf("Reset password: hash first 10 chars: %s, length: %d", hashStr[:10], len(hashStr))
 
-	if err := h.GormDB.Model(&models.User{}).Where("id = ?", uid).Update("hashed_password", string(hashed)).Error; err != nil {
+	if err := h.GormDB.Model(&models.User{}).Where("id = ?", uid).Update("hashed_password", hashStr).Error; err != nil {
+		log.Printf("Reset password: DB update FAILED for %s: %v", uid, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to reset password"})
 		return
 	}
+
+	// Post-save verification
+	var verify models.User
+	if err := h.GormDB.First(&verify, "id = ?", uid).Error; err != nil {
+		log.Printf("Reset password: post-save read FAILED for %s: %v", uid, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Password save verification failed"})
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(verify.HashedPassword), []byte(req.Password)); err != nil {
+		log.Printf("Reset password: CRITICAL — read-back hash fails bcrypt compare for %s: %v", uid, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Password save verification failed"})
+		return
+	}
+	log.Printf("Reset password: post-save verification PASSED for %s", uid)
 
 	c.JSON(http.StatusOK, gin.H{"detail": "Password reset successfully"})
 }
