@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"log"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -286,6 +288,23 @@ func (h *XeroAPIHandler) MatchTransactions(c *gin.Context) {
 	c.JSON(http.StatusOK, results)
 }
 
+// parseFlexDate handles date strings in various formats that GORM/pgx may return.
+func parseFlexDate(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{
+		"2006-01-02",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05-07:00",
+		time.RFC3339,
+		time.RFC3339Nano,
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // GET /xero/reconciliation-summary
 func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 	now := time.Now()
@@ -293,9 +312,11 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 
 	// 1. Fetch Plaid transactions from last 30 days
 	var plaidTxns []models.Transaction
-	h.GormDB.Where("date >= ? AND pending = false", startDate).
+	h.GormDB.Where("date >= ? AND (pending = false OR pending IS NULL)", startDate).
 		Order("date DESC").
 		Find(&plaidTxns)
+
+	log.Printf("Reconciliation: fetched %d Plaid transactions since %s", len(plaidTxns), startDate)
 
 	if len(plaidTxns) == 0 {
 		c.JSON(http.StatusOK, gin.H{
@@ -304,7 +325,7 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 			"unmatched":               0,
 			"match_rate":              0,
 			"unmatched_transactions":  []interface{}{},
-			"by_account":             []interface{}{},
+			"by_account":              []interface{}{},
 		})
 		return
 	}
@@ -316,7 +337,10 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 	var xeroTxns []models.XeroBankTransaction
 	h.GormDB.Where("date >= ? AND date <= ?", xeroStart, xeroEnd).Find(&xeroTxns)
 
-	// 3. Build lookup: for each Xero txn, key by rounded amount
+	log.Printf("Reconciliation: fetched %d Xero transactions (%s to %s)", len(xeroTxns), xeroStart, xeroEnd)
+
+	// 3. Build lookup: key by ABS amount in cents for fast matching.
+	//    Xero totals are always positive (SPEND and RECEIVE both > 0).
 	type xeroEntry struct {
 		date  time.Time
 		total float64
@@ -326,12 +350,14 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 		if xt.Total == nil || xt.Date == nil {
 			continue
 		}
-		// Key by amount in cents for fast lookup
 		cents := int64(math.Round(*xt.Total * 100))
 		xeroByAmount[cents] = append(xeroByAmount[cents], xeroEntry{date: *xt.Date, total: *xt.Total})
 	}
 
-	// 4. Match each Plaid transaction
+	// 4. Match each Plaid transaction against Xero by ABS(amount) ±$0.01 and date ±1 day.
+	//    Plaid: positive = debit/spend, negative = credit/receive.
+	//    Xero: total is always positive regardless of type.
+	//    So we compare ABS(plaid_amount) against xero_total.
 	type unmatchedTxn struct {
 		Date        string  `json:"date"`
 		Amount      float64 `json:"amount"`
@@ -348,11 +374,13 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 
 	matched := 0
 	unmatched := 0
+	skipped := 0
 	var unmatchedList []unmatchedTxn
 	byAccount := map[string]*accountStats{}
 
 	for _, pt := range plaidTxns {
 		if pt.Amount == nil || pt.Date == nil {
+			skipped++
 			continue
 		}
 
@@ -365,27 +393,21 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 		}
 		byAccount[acctName].Total++
 
-		plaidDate, err := time.Parse("2006-01-02", *pt.Date)
-		if err != nil {
+		plaidDate, ok := parseFlexDate(*pt.Date)
+		if !ok {
+			skipped++
 			continue
 		}
 
-		// Plaid amounts: positive = money out, Xero: could be either sign
-		// Check both the amount and negated amount
-		plaidAmt := *pt.Amount
+		// Compare ABS(plaid_amount) vs xero_total, with ±$0.01 tolerance
+		absCents := int64(math.Round(math.Abs(*pt.Amount) * 100))
 		found := false
-		for _, sign := range []float64{1, -1} {
-			cents := int64(math.Round(plaidAmt * sign * 100))
-			for _, delta := range []int64{0, 1, -1} {
-				candidates := xeroByAmount[cents+delta]
-				for _, xe := range candidates {
-					dayDiff := plaidDate.Sub(xe.date).Hours() / 24
-					if dayDiff >= -1 && dayDiff <= 1 {
-						found = true
-						break
-					}
-				}
-				if found {
+		for _, delta := range []int64{0, 1, -1} {
+			candidates := xeroByAmount[absCents+delta]
+			for _, xe := range candidates {
+				dayDiff := plaidDate.Sub(xe.date).Hours() / 24
+				if dayDiff >= -1 && dayDiff <= 1 {
+					found = true
 					break
 				}
 			}
@@ -412,8 +434,8 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 					plaidID = *pt.PlaidID
 				}
 				unmatchedList = append(unmatchedList, unmatchedTxn{
-					Date:        *pt.Date,
-					Amount:      plaidAmt,
+					Date:        plaidDate.Format("2006-01-02"),
+					Amount:      *pt.Amount,
 					Description: desc,
 					Account:     acctName,
 					PlaidTxnID:  plaidID,
@@ -427,6 +449,9 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 	if total > 0 {
 		matchRate = math.Round(float64(matched)/float64(total)*1000) / 10
 	}
+
+	log.Printf("Reconciliation: total=%d matched=%d unmatched=%d skipped=%d rate=%.1f%%",
+		total, matched, unmatched, skipped, matchRate)
 
 	// Convert byAccount map to slice
 	type accountOut struct {
@@ -455,6 +480,6 @@ func (h *XeroAPIHandler) ReconciliationSummary(c *gin.Context) {
 		"unmatched":               unmatched,
 		"match_rate":              matchRate,
 		"unmatched_transactions":  unmatchedList,
-		"by_account":             byAccountList,
+		"by_account":              byAccountList,
 	})
 }
