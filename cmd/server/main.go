@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 
@@ -21,15 +22,16 @@ func main() {
 	}
 
 	r := gin.Default()
-	r.Use(middleware.CORS())
 
 	routes.Register(r, gormDB, cfg.SecretKey, cfg)
 
 	scheduler := xerocron.Start(gormDB, cfg)
 	defer scheduler.Stop()
 
+	// CORS wraps the Gin engine so headers are set before Gin's router,
+	// ensuring redirects (trailing-slash 301s) also carry CORS headers.
 	log.Printf("Server starting on port %s", cfg.Port)
-	if err := r.Run(":" + cfg.Port); err != nil {
+	if err := http.ListenAndServe(":"+cfg.Port, middleware.CORS(r)); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
