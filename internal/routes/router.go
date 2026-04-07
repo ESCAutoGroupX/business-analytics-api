@@ -146,6 +146,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			plaid.GET("/items", plaidHandler.ListPlaidItems)
 			plaid.DELETE("/items/:id", plaidHandler.DeletePlaidItem)
 			plaid.POST("/sandbox/connect-bank", plaidHandler.SandboxConnectBank)
+			plaid.GET("/balance-history", plaidHandler.BalanceHistory)
 		}
 
 		// Xero (authenticated)
