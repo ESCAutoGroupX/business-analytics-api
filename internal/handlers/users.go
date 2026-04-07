@@ -42,7 +42,7 @@ type userCreateRequest struct {
 	Password     string   `json:"password" binding:"required"`
 	FirstName    string   `json:"first_name" binding:"required"`
 	LastName     string   `json:"last_name" binding:"required"`
-	MobileNumber string   `json:"mobile_number" binding:"required"`
+	MobileNumber string   `json:"mobile_number"`
 	Role         *string  `json:"role"`
 	LocationIDs  FlexIDs `json:"location_ids"`
 }
@@ -228,11 +228,13 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		return
 	}
 
-	// Check mobile_number uniqueness
-	h.GormDB.Model(&models.User{}).Where("mobile_number = ?", req.MobileNumber).Count(&count)
-	if count > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"detail": "Mobile number already registered"})
-		return
+	// Check mobile_number uniqueness (only if provided)
+	if req.MobileNumber != "" {
+		h.GormDB.Model(&models.User{}).Where("mobile_number = ?", req.MobileNumber).Count(&count)
+		if count > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"detail": "Mobile number already registered"})
+			return
+		}
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -254,7 +256,7 @@ func (h *UserHandler) CreateUser(c *gin.Context) {
 		HashedPassword: string(hashedPassword),
 		FirstName:      &req.FirstName,
 		LastName:       &req.LastName,
-		MobileNumber:   &req.MobileNumber,
+		MobileNumber:   nilIfEmpty(req.MobileNumber),
 		Role:           &role,
 		IsActive:       true,
 		IsSuperuser:    false,
@@ -428,6 +430,13 @@ func (h *UserHandler) applyUserUpdate(uid string, req *userUpdateRequest) error 
 func atoiSafe(s string) int {
 	v, _ := strconv.Atoi(s)
 	return v
+}
+
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // Ensure gorm.ErrRecordNotFound is referenced to avoid import error
