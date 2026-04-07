@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -626,51 +627,130 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 	endDate := c.Query("end_date")
 	paymentType := c.Query("payment_type")
 	vendorName := c.Query("vendor_name")
+	accountID := c.Query("account_id")
 
-	// Get initial total balance from DEPOSITORY payment methods
-	var initialTotalBalance float64
-	err := h.sqlDB().QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(starting_credit_card_bal), 0)
-		 FROM payment_methods WHERE method_type = 'DEPOSITORY'`).Scan(&initialTotalBalance)
+	// ── Step 1: Get latest balance per depository account from daily_balance_snapshots ──
+	acctBalances := map[string]float64{}
+	balRows, err := h.sqlDB().QueryContext(ctx,
+		`SELECT DISTINCT ON (account_id) account_id, current_balance
+		 FROM daily_balance_snapshots
+		 WHERE account_type = 'depository' AND current_balance IS NOT NULL
+		 ORDER BY account_id, snapshot_date DESC`)
 	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query payment methods", "error": err.Error()})
+		log.Printf("ERROR: failed to query balance snapshots: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query balance snapshots", "error": err.Error()})
 		return
 	}
-	initialTotalBalance = round2(initialTotalBalance)
+	defer balRows.Close()
+	for balRows.Next() {
+		var aid string
+		var bal float64
+		if err := balRows.Scan(&aid, &bal); err != nil {
+			log.Printf("ERROR: scanning balance snapshot row: %v", err)
+			continue
+		}
+		acctBalances[aid] = bal
+	}
 
-	// Build WHERE clause filtering transactions directly by account_type
-	where := "WHERE account_type = 'depository'"
-	args := []interface{}{}
-	argIdx := 1
+	// ── Step 2: Load ALL depository transactions for running-balance calculation ──
+	// Only date-range and account_id filters apply here; vendor/payment_type are display-only.
+	balWhere := "WHERE account_type = 'depository'"
+	balArgs := []interface{}{}
+	balIdx := 1
 
 	if startDate != "" {
-		where += fmt.Sprintf(" AND date >= $%d", argIdx)
-		args = append(args, startDate)
-		argIdx++
+		balWhere += fmt.Sprintf(" AND date >= $%d", balIdx)
+		balArgs = append(balArgs, startDate)
+		balIdx++
 	}
 	if endDate != "" {
-		where += fmt.Sprintf(" AND date <= $%d", argIdx)
-		args = append(args, endDate)
-		argIdx++
+		balWhere += fmt.Sprintf(" AND date <= $%d", balIdx)
+		balArgs = append(balArgs, endDate)
+		balIdx++
 	}
-	if paymentType != "" {
-		where += fmt.Sprintf(" AND transaction_type = $%d", argIdx)
-		args = append(args, paymentType)
-		argIdx++
-	}
-	if vendorName != "" {
-		where += fmt.Sprintf(" AND vendor ILIKE $%d", argIdx)
-		args = append(args, "%"+vendorName+"%")
-		argIdx++
+	if accountID != "" {
+		balWhere += fmt.Sprintf(" AND account_id = $%d", balIdx)
+		balArgs = append(balArgs, accountID)
+		balIdx++
 	}
 
-	// Count
-	var totalTransactions int
-	h.sqlDB().QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM transactions %s", where), args...).Scan(&totalTransactions)
+	allTxRows, err := h.sqlDB().QueryContext(ctx,
+		fmt.Sprintf(`SELECT id, COALESCE(plaid_id, ''), COALESCE(date::text, ''),
+		        COALESCE(amount, 0), COALESCE(vendor, ''), COALESCE(name, ''),
+		        COALESCE(transaction_type, ''), COALESCE(merchant_name, ''),
+		        COALESCE(account_name, ''), COALESCE(account_id, ''),
+		        COALESCE(pending, false), COALESCE(source, '')
+		 FROM transactions %s
+		 ORDER BY account_id, date DESC, transaction_datetime DESC NULLS LAST, created_at DESC`, balWhere), balArgs...)
+	if err != nil {
+		log.Printf("ERROR: failed to query transactions for ledger: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions", "error": err.Error()})
+		return
+	}
+	defer allTxRows.Close()
 
+	// ── Step 3: Per-account running balance, walking newest-first ──
+	type ledgerEntry struct {
+		ID             string
+		PlaidID        string
+		Date           string
+		Amount         float64
+		Vendor         string
+		Name           string
+		TxType         string
+		MerchantName   string
+		AccountName    string
+		AccountID      string
+		Source         string
+		Pending        bool
+		RunningBalance *float64 // nil for pending transactions
+	}
+
+	var allEntries []ledgerEntry
+	currentAcct := ""
+	var running float64
+
+	for allTxRows.Next() {
+		var e ledgerEntry
+		if err := allTxRows.Scan(&e.ID, &e.PlaidID, &e.Date, &e.Amount, &e.Vendor,
+			&e.Name, &e.TxType, &e.MerchantName, &e.AccountName, &e.AccountID,
+			&e.Pending, &e.Source); err != nil {
+			log.Printf("ERROR: scanning transaction row: %v", err)
+			continue
+		}
+
+		if e.AccountID != currentAcct {
+			currentAcct = e.AccountID
+			running = acctBalances[currentAcct]
+		}
+
+		if !e.Pending {
+			bal := round2(running)
+			e.RunningBalance = &bal
+			running += e.Amount // Plaid convention: positive = money out; += undoes the txn
+		}
+		// Pending transactions: RunningBalance stays nil
+
+		allEntries = append(allEntries, e)
+	}
+
+	// ── Step 4: Apply vendor / payment_type display filters ──
+	var filtered []ledgerEntry
+	for _, e := range allEntries {
+		if paymentType != "" && !strings.EqualFold(e.TxType, paymentType) {
+			continue
+		}
+		if vendorName != "" && !strings.Contains(strings.ToLower(e.Vendor), strings.ToLower(vendorName)) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+
+	// ── Step 5: Count and pagination metadata ──
+	totalTransactions := len(filtered)
 	totalPages := int(math.Ceil(float64(totalTransactions) / float64(pageSize)))
 
+	// ── Step 6: Sort filtered entries ──
 	validSorts := map[string]string{
 		"date": "date", "amount": "amount", "vendor": "vendor",
 		"transaction_type": "transaction_type", "created_at": "created_at",
@@ -680,136 +760,75 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 	if v, ok := validSorts[sortBy]; ok {
 		sortCol = v
 	}
-	order := "DESC"
-	if strings.ToLower(sortOrder) == "asc" {
-		order = "ASC"
-	}
+	asc := strings.ToLower(sortOrder) == "asc"
 
-	// Compute running balance across all accounts (all transactions sorted by date)
-	// First get all transactions to compute running balance
-	allTxRows, err := h.sqlDB().QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, COALESCE(date::text, ''), COALESCE(amount, 0), COALESCE(vendor, ''),
-		        COALESCE(name, ''), COALESCE(transaction_type, ''), COALESCE(merchant_name, ''),
-		        COALESCE(account_name, ''), COALESCE(account_id, '')
-		 FROM transactions %s ORDER BY date, created_at`, where), args...)
-	if err != nil {
-		log.Printf("ERROR: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions", "error": err.Error()})
-		return
-	}
-	defer allTxRows.Close()
-
-	type ledgerEntry struct {
-		ID             string
-		Date           string
-		Amount         float64
-		Vendor         string
-		Name           string
-		TxType         string
-		MerchantName   string
-		AccountName    string
-		AccountID      string
-		RunningBalance float64
-	}
-	var allEntries []ledgerEntry
-	runBal := initialTotalBalance
-	for allTxRows.Next() {
-		var e ledgerEntry
-		allTxRows.Scan(&e.ID, &e.Date, &e.Amount, &e.Vendor, &e.Name, &e.TxType, &e.MerchantName, &e.AccountName, &e.AccountID)
-		runBal += e.Amount * -1
-		e.RunningBalance = round2(runBal)
-		allEntries = append(allEntries, e)
-	}
-
-	finalBalance := round2(runBal)
-
-	// Sort if needed (data is already in date asc order)
-	// For pagination, we need the properly sorted slice
-	if sortCol != "date" || order != "ASC" {
-		// Re-query with proper sort for pagination
-		offset := (page - 1) * pageSize
-		sortedQ := fmt.Sprintf(
-			`SELECT id FROM transactions %s ORDER BY %s %s OFFSET $%d LIMIT $%d`,
-			where, sortCol, order, argIdx, argIdx+1)
-		sortedArgs := append(args, offset, pageSize)
-		sortedRows, err := h.sqlDB().QueryContext(ctx, sortedQ, sortedArgs...)
-		if err != nil {
-			log.Printf("ERROR: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query sorted transactions", "error": err.Error()})
-			return
-		}
-		defer sortedRows.Close()
-
-		// Build a map of running balances
-		balMap := map[string]float64{}
-		for _, e := range allEntries {
-			balMap[e.ID] = e.RunningBalance
-		}
-
-		ledger := []gin.H{}
-		for sortedRows.Next() {
-			var txID string
-			sortedRows.Scan(&txID)
-			// Fetch full row
-			var date string
-			var amt float64
-			var vendor, name, txType, merchantName, accountName, accountIDVal string
-			h.sqlDB().QueryRowContext(ctx,
-				`SELECT COALESCE(date::text, ''), COALESCE(amount, 0), COALESCE(vendor, ''),
-				        COALESCE(name, ''), COALESCE(transaction_type, ''), COALESCE(merchant_name, ''),
-				        COALESCE(account_name, ''), COALESCE(account_id, '')
-				 FROM transactions WHERE id = $1`, txID).Scan(&date, &amt, &vendor, &name, &txType, &merchantName, &accountName, &accountIDVal)
-			ledger = append(ledger, gin.H{
-				"id": txID, "date": date, "amount": round2(amt), "vendor": vendor,
-				"name": name, "transaction_type": txType, "merchant_name": merchantName,
-				"account_name": accountName, "account_id": accountIDVal,
-				"running_balance": balMap[txID],
-			})
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"initial_total_balance": initialTotalBalance,
-			"final_overall_balance": finalBalance,
-			"total_transactions":    totalTransactions,
-			"page":                  page,
-			"page_size":             pageSize,
-			"total_pages":           totalPages,
-			"sort_by":               sortBy,
-			"sort_order":            sortOrder,
-			"ledger":                ledger,
+	switch sortCol {
+	case "amount":
+		sort.Slice(filtered, func(i, j int) bool {
+			if asc {
+				return filtered[i].Amount < filtered[j].Amount
+			}
+			return filtered[i].Amount > filtered[j].Amount
 		})
-		return
+	case "vendor":
+		sort.Slice(filtered, func(i, j int) bool {
+			if asc {
+				return strings.ToLower(filtered[i].Vendor) < strings.ToLower(filtered[j].Vendor)
+			}
+			return strings.ToLower(filtered[i].Vendor) > strings.ToLower(filtered[j].Vendor)
+		})
+	default:
+		// "date" and everything else: data is already in account/date DESC order from SQL.
+		// For a pure date sort we re-sort across accounts.
+		sort.Slice(filtered, func(i, j int) bool {
+			if asc {
+				return filtered[i].Date < filtered[j].Date
+			}
+			return filtered[i].Date > filtered[j].Date
+		})
 	}
 
-	// Default: date asc - just slice from allEntries
+	// ── Step 7: Paginate ──
 	offset := (page - 1) * pageSize
 	end := offset + pageSize
-	if end > len(allEntries) {
-		end = len(allEntries)
+	if end > len(filtered) {
+		end = len(filtered)
 	}
 
 	ledger := []gin.H{}
-	if offset < len(allEntries) {
-		for _, e := range allEntries[offset:end] {
-			ledger = append(ledger, gin.H{
-				"id": e.ID, "date": e.Date, "amount": round2(e.Amount), "vendor": e.Vendor,
-				"name": e.Name, "transaction_type": e.TxType, "merchant_name": e.MerchantName,
-				"account_name": e.AccountName, "account_id": e.AccountID,
-				"running_balance": e.RunningBalance,
-			})
+	if offset < len(filtered) {
+		for _, e := range filtered[offset:end] {
+			entry := gin.H{
+				"id":               e.ID,
+				"plaid_id":         e.PlaidID,
+				"date":             e.Date,
+				"amount":           round2(e.Amount),
+				"vendor":           e.Vendor,
+				"name":             e.Name,
+				"transaction_type": e.TxType,
+				"merchant_name":    e.MerchantName,
+				"account_name":     e.AccountName,
+				"account_id":       e.AccountID,
+				"pending":          e.Pending,
+				"source":           e.Source,
+			}
+			if e.RunningBalance != nil {
+				entry["running_balance"] = *e.RunningBalance
+			} else {
+				entry["running_balance"] = nil
+			}
+			ledger = append(ledger, entry)
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"initial_total_balance": initialTotalBalance,
-		"final_overall_balance": finalBalance,
-		"total_transactions":    totalTransactions,
-		"page":                  page,
-		"page_size":             pageSize,
-		"total_pages":           totalPages,
-		"sort_by":               sortBy,
-		"sort_order":            sortOrder,
-		"ledger":                ledger,
+		"total_transactions": totalTransactions,
+		"page":               page,
+		"page_size":          pageSize,
+		"total_pages":        totalPages,
+		"sort_by":            sortBy,
+		"sort_order":         sortOrder,
+		"ledger":             ledger,
 	})
 }
 
