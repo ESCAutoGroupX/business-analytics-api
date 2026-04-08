@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
@@ -376,7 +377,7 @@ func (h *PlaidHandler) SyncPlaidTransactions() {
 	}
 
 	for i, item := range items {
-		totalAdded, totalModified, totalRemoved := 0, 0, 0
+		totalAdded, totalModified, totalRemoved, dbErrors := 0, 0, 0, 0
 		cursor := item.Cursor
 		hasMore := true
 
@@ -410,7 +411,9 @@ func (h *PlaidHandler) SyncPlaidTransactions() {
 			// Process added transactions
 			if added, ok := result["added"].([]interface{}); ok {
 				for _, t := range added {
-					h.upsertPlaidTransaction(t, acctMeta)
+					if err := h.upsertPlaidTransaction(t, acctMeta); err != nil {
+						dbErrors++
+					}
 				}
 				totalAdded += len(added)
 			}
@@ -418,7 +421,9 @@ func (h *PlaidHandler) SyncPlaidTransactions() {
 			// Process modified transactions
 			if modified, ok := result["modified"].([]interface{}); ok {
 				for _, t := range modified {
-					h.upsertPlaidTransaction(t, acctMeta)
+					if err := h.upsertPlaidTransaction(t, acctMeta); err != nil {
+						dbErrors++
+					}
 				}
 				totalModified += len(modified)
 			}
@@ -451,8 +456,8 @@ func (h *PlaidHandler) SyncPlaidTransactions() {
 		}
 
 		if totalAdded > 0 || totalModified > 0 || totalRemoved > 0 {
-			log.Printf("PlaidSync: %s (id=%d): +%d added, ~%d modified, -%d removed",
-				item.InstitutionName, item.ID, totalAdded, totalModified, totalRemoved)
+			log.Printf("PlaidSync: %s (id=%d): +%d added, ~%d modified, -%d removed, %d db_errors",
+				item.InstitutionName, item.ID, totalAdded, totalModified, totalRemoved, dbErrors)
 		}
 	}
 }
@@ -462,15 +467,15 @@ func (h *PlaidHandler) SyncPlaidTransactions() {
 func (h *PlaidHandler) upsertPlaidTransaction(
 	t interface{},
 	acctMeta map[string]struct{ Name, Type, Subtype string },
-) {
+) error {
 	tx, ok := t.(map[string]interface{})
 	if !ok {
-		return
+		return fmt.Errorf("invalid transaction object")
 	}
 
 	plaidID := plaidStr(tx, "transaction_id")
 	if plaidID == nil || *plaidID == "" {
-		return
+		return fmt.Errorf("missing transaction_id")
 	}
 
 	accountID := plaidStr(tx, "account_id")
@@ -483,43 +488,11 @@ func (h *PlaidHandler) upsertPlaidTransaction(
 		}
 	}
 
-	pending := plaidBool(tx, "pending")
-	source := "plaid"
+	id := uuid.New().String()
 
-	rec := models.Transaction{
-		PlaidID:             plaidID,
-		AccountID:           accountID,
-		Date:                plaidStr(tx, "date"),
-		AuthorizedDate:      plaidStr(tx, "authorized_date"),
-		Amount:              plaidFloat(tx, "amount"),
-		CurrencyISO:         plaidStr(tx, "iso_currency_code"),
-		Name:                plaidStr(tx, "name"),
-		MerchantName:        plaidStr(tx, "merchant_name"),
-		MerchantEntityID:    plaidStr(tx, "merchant_entity_id"),
-		Website:             plaidStr(tx, "website"),
-		LogoURL:             plaidStr(tx, "logo_url"),
-		PaymentChannel:      plaidStr(tx, "payment_channel"),
-		TransactionType:     plaidStr(tx, "transaction_type"),
-		TransactionCode:     plaidStr(tx, "transaction_code"),
-		Pending:             pending,
-		PendingID:           plaidStr(tx, "pending_transaction_id"),
-		AccountOwner:        plaidStr(tx, "account_owner"),
-		CheckNumber:         plaidStr(tx, "check_number"),
-		Category:            plaidJSON(tx, "category"),
-		PersonalFinanceCategory: plaidJSON(tx, "personal_finance_category"),
-		Location:            plaidJSON(tx, "location"),
-		Counterparties:      plaidJSON(tx, "counterparties"),
-		PaymentMeta:         plaidJSON(tx, "payment_meta"),
-		AccountName:         acctName,
-		AccountType:         acctType,
-		AccountSubtype:      acctSubtype,
-		Source:              &source,
-	}
-
-	// Upsert: insert or update on plaid_id conflict
-	h.GormDB.Exec(`
+	result := h.GormDB.Exec(`
 		INSERT INTO transactions (
-			plaid_id, account_id, date, authorized_date, amount,
+			id, plaid_id, account_id, date, authorized_date, amount,
 			currency_iso, name, merchant_name, merchant_entity_id,
 			website, logo_url, payment_channel, transaction_type,
 			transaction_code, pending, pending_id, account_owner,
@@ -527,12 +500,12 @@ func (h *PlaidHandler) upsertPlaidTransaction(
 			location, counterparties, payment_meta,
 			account_name, account_type, account_subtype, source
 		) VALUES (
-			?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?,
-			?, ?, ?,
+			?, ?::json, ?::json,
+			?::json, ?::json, ?::json,
 			?, ?, ?, ?
 		)
 		ON CONFLICT (plaid_id) DO UPDATE SET
@@ -564,14 +537,19 @@ func (h *PlaidHandler) upsertPlaidTransaction(
 			source = EXCLUDED.source,
 			updated_at = NOW()
 	`,
-		rec.PlaidID, rec.AccountID, rec.Date, rec.AuthorizedDate, rec.Amount,
-		rec.CurrencyISO, rec.Name, rec.MerchantName, rec.MerchantEntityID,
-		rec.Website, rec.LogoURL, rec.PaymentChannel, rec.TransactionType,
-		rec.TransactionCode, rec.Pending, rec.PendingID, rec.AccountOwner,
-		rec.CheckNumber, rec.Category, rec.PersonalFinanceCategory,
-		rec.Location, rec.Counterparties, rec.PaymentMeta,
-		rec.AccountName, rec.AccountType, rec.AccountSubtype, rec.Source,
+		id, plaidID, accountID, plaidStr(tx, "date"), plaidStr(tx, "authorized_date"), plaidFloat(tx, "amount"),
+		plaidStr(tx, "iso_currency_code"), plaidStr(tx, "name"), plaidStr(tx, "merchant_name"), plaidStr(tx, "merchant_entity_id"),
+		plaidStr(tx, "website"), plaidStr(tx, "logo_url"), plaidStr(tx, "payment_channel"), plaidStr(tx, "transaction_type"),
+		plaidStr(tx, "transaction_code"), plaidBool(tx, "pending"), plaidStr(tx, "pending_transaction_id"), plaidStr(tx, "account_owner"),
+		plaidStr(tx, "check_number"), plaidJSON(tx, "category"), plaidJSON(tx, "personal_finance_category"),
+		plaidJSON(tx, "location"), plaidJSON(tx, "counterparties"), plaidJSON(tx, "payment_meta"),
+		acctName, acctType, acctSubtype, "plaid",
 	)
+	if result.Error != nil {
+		log.Printf("PlaidSync: DB error for %s: %v", *plaidID, result.Error)
+		return result.Error
+	}
+	return nil
 }
 
 // ── Plaid JSON field helpers ─────────────────────────────────────────────
