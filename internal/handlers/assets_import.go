@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,25 +45,32 @@ func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 		colIdx[h] = i
 	}
 
+	log.Printf("Asset CSV import: parsed headers: %v", colIdx)
+
 	if _, ok := colIdx["AssetNumber"]; !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "CSV must contain AssetNumber column"})
 		return
 	}
 
-	imported := 0
-	var importErrors []string
-	rowNum := 1
-
+	// Count rows first for logging
+	var rows [][]string
 	for {
 		row, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
-		rowNum++
 		if err != nil {
-			importErrors = append(importErrors, fmt.Sprintf("row %d: %v", rowNum, err))
 			continue
 		}
+		rows = append(rows, row)
+	}
+	log.Printf("Asset CSV import: processing %d rows", len(rows))
+
+	imported := 0
+	var importErrors []string
+
+	for i, row := range rows {
+		rowNum := i + 2 // 1-indexed, skip header
 
 		assetNumber := csvGet(row, colIdx, "AssetNumber")
 		if assetNumber == "" {
@@ -70,51 +78,65 @@ func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 			continue
 		}
 
-		status := csvGet(row, colIdx, "AssetStatus")
-		depMethod := csvGet(row, colIdx, "Book_DepreciationMethod")
-		description := csvGet(row, colIdx, "Description")
-		location := csvGet(row, colIdx, "TrackingOption1")
-		assetTypeName := csvGet(row, colIdx, "AssetType")
-
-		fields := map[string]interface{}{
-			"xero_id":                 fmt.Sprintf("csv-import-%s", assetNumber),
-			"tenant_id":               "csv-import",
-			"asset_name":              csvGet(row, colIdx, "AssetName"),
-			"status":                  csvNilIfEmpty(status),
-			"purchase_date":           csvParseDate(csvGet(row, colIdx, "PurchaseDate")),
-			"purchase_price":          csvParseFloat(csvGet(row, colIdx, "PurchasePrice")),
-			"asset_type":              csvGet(row, colIdx, "AssetType"),
-			"asset_type_name":         csvNilIfEmpty(assetTypeName),
-			"description":             csvNilIfEmpty(description),
-			"location":                csvNilIfEmpty(location),
-			"depreciation_method":     csvNilIfEmpty(depMethod),
-			"depreciation_rate":       csvParseFloat(csvGet(row, colIdx, "Book_Rate")),
-			"effective_life":          csvParseFloat(csvGet(row, colIdx, "Book_EffectiveLife")),
-			"book_value":              csvParseFloat(csvGet(row, colIdx, "Book_BookValue")),
-			"residual_value":          csvParseFloat(csvGet(row, colIdx, "Book_ResidualValue")),
-			"accumulated_depreciation": csvParseFloat(csvGet(row, colIdx, "AccumulatedDepreciation")),
-			"depreciation_start_date": csvParseDate(csvGet(row, colIdx, "Book_DepreciationStartDate")),
-			"disposal_date":           csvParseDate(csvGet(row, colIdx, "DisposalDate")),
-			"synced_at":               time.Now(),
+		// Find or create by asset_number
+		var asset models.XeroAsset
+		result := h.GormDB.Where("asset_number = ?", assetNumber).FirstOrCreate(&asset)
+		if result.Error != nil {
+			log.Printf("Asset import error for %s (FirstOrCreate): %v", assetNumber, result.Error)
+			importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, result.Error))
+			continue
 		}
 
-		// Upsert: find by asset_number, update or create
-		var existing models.XeroAsset
-		result := h.GormDB.Where("asset_number = ?", assetNumber).First(&existing)
-		if result.Error == nil {
-			if err := h.GormDB.Model(&existing).Updates(fields).Error; err != nil {
-				importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, err))
-				continue
-			}
-		} else {
-			fields["asset_number"] = assetNumber
-			if err := h.GormDB.Model(&models.XeroAsset{}).Create(fields).Error; err != nil {
-				importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, err))
-				continue
-			}
+		// Populate XeroID and TenantID if new record
+		if asset.XeroID == "" {
+			asset.XeroID = fmt.Sprintf("csv-import-%s", assetNumber)
+		}
+		if asset.TenantID == "" {
+			asset.TenantID = "csv-import"
+		}
+
+		// Update all fields from CSV
+		an := assetNumber
+		asset.AssetNumber = &an
+		asset.AssetName = csvGet(row, colIdx, "AssetName")
+
+		if v := csvGet(row, colIdx, "AssetStatus"); v != "" {
+			asset.Status = &v
+		}
+		if v := csvGet(row, colIdx, "AssetType"); v != "" {
+			asset.AssetType = v
+			asset.AssetTypeName = &v
+		}
+		if v := csvGet(row, colIdx, "Description"); v != "" {
+			asset.Description = &v
+		}
+		if v := csvGet(row, colIdx, "TrackingOption1"); v != "" {
+			asset.Location = &v
+		}
+		if v := csvGet(row, colIdx, "Book_DepreciationMethod"); v != "" {
+			asset.DepreciationMethod = &v
+		}
+
+		asset.PurchasePrice = csvParseFloat(csvGet(row, colIdx, "PurchasePrice"))
+		asset.DepreciationRate = csvParseFloat(csvGet(row, colIdx, "Book_Rate"))
+		asset.EffectiveLife = csvParseFloat(csvGet(row, colIdx, "Book_EffectiveLife"))
+		asset.BookValue = csvParseFloat(csvGet(row, colIdx, "Book_BookValue"))
+		asset.ResidualValue = csvParseFloat(csvGet(row, colIdx, "Book_ResidualValue"))
+		asset.AccumulatedDepreciation = csvParseFloat(csvGet(row, colIdx, "AccumulatedDepreciation"))
+		asset.PurchaseDate = csvParseDate(csvGet(row, colIdx, "PurchaseDate"))
+		asset.DepreciationStartDate = csvParseDate(csvGet(row, colIdx, "Book_DepreciationStartDate"))
+		asset.DisposalDate = csvParseDate(csvGet(row, colIdx, "DisposalDate"))
+		asset.SyncedAt = time.Now()
+
+		if err := h.GormDB.Save(&asset).Error; err != nil {
+			log.Printf("Asset import error for %s (Save): %v", assetNumber, err)
+			importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, err))
+			continue
 		}
 		imported++
 	}
+
+	log.Printf("Asset CSV import: imported %d assets, %d errors", imported, len(importErrors))
 
 	c.JSON(http.StatusOK, gin.H{
 		"imported": imported,
