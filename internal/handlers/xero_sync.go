@@ -709,17 +709,31 @@ func (h *XeroSyncHandler) SyncTrackingCategories(conn *models.XeroConnection) er
 // ── Sync: Accounts (Chart of Accounts) ─────────────────────────
 
 func (h *XeroSyncHandler) SyncAccounts(conn *models.XeroConnection) error {
+	log.Printf("SyncAccounts: starting, tenant=%s, token_expires=%v", conn.TenantID, conn.ExpiresAt)
+
+	log.Printf("SyncAccounts: calling Xero GET /Accounts API")
 	result, err := h.xeroAPIGet(conn.AccessToken, conn.TenantID, "Accounts")
 	if err != nil {
+		log.Printf("SyncAccounts: ERROR from Xero API: %v", err)
 		h.logSync(conn.TenantID, "accounts", "error", 0, err.Error())
 		return err
 	}
 
+	// Log the top-level keys to see what Xero returned
+	keys := make([]string, 0, len(result))
+	for k := range result {
+		keys = append(keys, k)
+	}
+	log.Printf("SyncAccounts: response keys: %v", keys)
+
 	accounts, ok := result["Accounts"].([]interface{})
 	if !ok {
-		h.logSync(conn.TenantID, "accounts", "success", 0, "")
+		log.Printf("SyncAccounts: WARNING 'Accounts' key missing or not array, got type %T", result["Accounts"])
+		h.logSync(conn.TenantID, "accounts", "success", 0, "no Accounts array in response")
 		return nil
 	}
+
+	log.Printf("SyncAccounts: got %d accounts from Xero", len(accounts))
 
 	totalSynced := 0
 	for _, a := range accounts {
@@ -744,16 +758,19 @@ func (h *XeroSyncHandler) SyncAccounts(conn *models.XeroConnection) error {
 			TaxType:             xeroStr(am, "TaxType"),
 		}
 
-		h.GormDB.Clauses(clause.OnConflict{
+		if err := h.GormDB.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "xero_id"}},
 			UpdateAll: true,
-		}).Create(&record)
+		}).Create(&record).Error; err != nil {
+			log.Printf("SyncAccounts: ERROR inserting account %s (%s): %v", record.Code, record.Name, err)
+			continue
+		}
 		totalSynced++
 	}
 
 	h.updateSyncState("accounts", totalSynced)
 	h.logSync(conn.TenantID, "accounts", "success", totalSynced, "")
-	log.Printf("SyncAccounts: synced %d accounts", totalSynced)
+	log.Printf("SyncAccounts: done, inserted %d accounts", totalSynced)
 	return nil
 }
 
