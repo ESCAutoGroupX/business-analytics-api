@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -45,7 +46,15 @@ func (h *AssetAIHandler) ClassifyAssets(c *gin.Context) {
 		return
 	}
 
-	if h.Cfg.AnthropicAPIKey == "" {
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	keyLen := len(apiKey)
+	prefix := apiKey
+	if keyLen > 10 {
+		prefix = apiKey[:10]
+	}
+	log.Printf("AI Classify: API key length=%d, prefix=%s", keyLen, prefix)
+
+	if apiKey == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "ANTHROPIC_API_KEY not configured"})
 		return
 	}
@@ -82,7 +91,7 @@ func (h *AssetAIHandler) ClassifyAssets(c *gin.Context) {
 		}
 		batch := assets[i:end]
 
-		results, err := h.classifyBatch(batch)
+		results, err := h.classifyBatch(batch, apiKey)
 		if err != nil {
 			log.Printf("AI Classify batch error (assets %d-%d): %v", i, end-1, err)
 			continue
@@ -122,7 +131,7 @@ func (h *AssetAIHandler) ClassifyAssets(c *gin.Context) {
 	})
 }
 
-func (h *AssetAIHandler) classifyBatch(assets []models.XeroAsset) ([]aiAssetResult, error) {
+func (h *AssetAIHandler) classifyBatch(assets []models.XeroAsset, apiKey string) ([]aiAssetResult, error) {
 	// Build asset list for prompt
 	type assetInput struct {
 		ID            int     `json:"id"`
@@ -178,7 +187,7 @@ Return JSON array only, no markdown: [{id, category, useful_life_years, deprecia
 
 	httpReq, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(bodyBytes))
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", h.Cfg.AnthropicAPIKey)
+	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
 	client := &http.Client{Timeout: 120 * time.Second}
