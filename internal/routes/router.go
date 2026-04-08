@@ -26,6 +26,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	xeroAPIHandler := &handlers.XeroAPIHandler{GormDB: gormDB, Sync: xeroSyncHandler}
 	assetImportHandler := &handlers.AssetImportHandler{GormDB: gormDB}
 	assetAIHandler := &handlers.AssetAIHandler{GormDB: gormDB, Cfg: cfg}
+	journalHandler := &handlers.JournalHandler{GormDB: gormDB}
 	paymentMethodHandler := &handlers.PaymentMethodHandler{GormDB: gormDB}
 	cardHandler := &handlers.CardHandler{GormDB: gormDB}
 	twoFAHandler := &handlers.TwoFactorAuthHandler{GormDB: gormDB, SecretKey: secretKey}
@@ -185,6 +186,9 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		protected.GET("/xero/asset-types", xeroAPIHandler.ListAssetTypes)
 		protected.GET("/xero/accounts", xeroAPIHandler.ListAccounts)
 		protected.GET("/xero/journals", xeroAPIHandler.ListJournals)
+		protected.POST("/xero/journals", journalHandler.CreateJournal)
+		protected.PATCH("/xero/journals/:id", journalHandler.UpdateJournal)
+		protected.DELETE("/xero/journals/:id", journalHandler.DeleteJournal)
 		protected.GET("/xero/tracking-categories", xeroAPIHandler.ListTrackingCategories)
 		protected.GET("/xero/reports/:type", xeroAPIHandler.GetReport)
 		protected.GET("/xero/match-transactions", xeroAPIHandler.MatchTransactions)
