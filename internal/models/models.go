@@ -732,6 +732,7 @@ func (XeroReportCache) TableName() string { return "xero_reports_cache" }
 type ReconciliationOverride struct {
 	PlaidID       string    `gorm:"column:plaid_id;primaryKey" json:"plaid_id"`
 	VendorName    string    `gorm:"column:vendor_name" json:"vendor_name"`
+	Description   string    `gorm:"column:description" json:"description"`
 	GLAccountCode string    `gorm:"column:gl_account_code" json:"gl_account_code"`
 	Notes         string    `gorm:"column:notes" json:"notes"`
 	MatchStatus   string    `gorm:"column:match_status;default:unmatched" json:"match_status"`

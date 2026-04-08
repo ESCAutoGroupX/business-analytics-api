@@ -562,6 +562,7 @@ func (h *XeroAPIHandler) SaveReconciliationOverride(c *gin.Context) {
 	var req struct {
 		PlaidID       string `json:"plaid_id" binding:"required"`
 		VendorName    string `json:"vendor_name"`
+		Description   string `json:"description"`
 		GLAccountCode string `json:"gl_account_code"`
 		Notes         string `json:"notes"`
 		MatchStatus   string `json:"match_status"`
@@ -583,6 +584,7 @@ func (h *XeroAPIHandler) SaveReconciliationOverride(c *gin.Context) {
 	override := models.ReconciliationOverride{
 		PlaidID:       req.PlaidID,
 		VendorName:    req.VendorName,
+		Description:   req.Description,
 		GLAccountCode: req.GLAccountCode,
 		Notes:         req.Notes,
 		MatchStatus:   req.MatchStatus,

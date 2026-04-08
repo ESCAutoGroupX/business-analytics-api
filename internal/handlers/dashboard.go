@@ -734,13 +734,21 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 		allEntries = append(allEntries, e)
 	}
 
+	// ── Step 3b: Load overrides for description enrichment ──
+	var blOverrides []models.ReconciliationOverride
+	h.GormDB.Find(&blOverrides)
+	blOverrideMap := map[string]models.ReconciliationOverride{}
+	for _, o := range blOverrides {
+		blOverrideMap[o.PlaidID] = o
+	}
+
 	// ── Step 4: Apply vendor / payment_type display filters ──
 	var filtered []ledgerEntry
 	for _, e := range allEntries {
 		if paymentType != "" && !strings.EqualFold(e.TxType, paymentType) {
 			continue
 		}
-		if vendorName != "" && !strings.Contains(strings.ToLower(e.Vendor), strings.ToLower(vendorName)) {
+		if vendorName != "" && !strings.Contains(strings.ToLower(e.Name), strings.ToLower(vendorName)) {
 			continue
 		}
 		filtered = append(filtered, e)
@@ -798,15 +806,21 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 	ledger := []gin.H{}
 	if offset < len(filtered) {
 		for _, e := range filtered[offset:end] {
+			// Description = override description > merchant_name
+			desc := e.MerchantName
+			if ov, ok := blOverrideMap[e.PlaidID]; ok && ov.Description != "" {
+				desc = ov.Description
+			}
 			entry := gin.H{
 				"id":               e.ID,
 				"plaid_id":         e.PlaidID,
 				"date":             e.Date,
 				"amount":           round2(e.Amount),
-				"vendor":           e.Vendor,
+				"vendor":           e.Name,
 				"name":             e.Name,
 				"transaction_type": e.TxType,
 				"merchant_name":    e.MerchantName,
+				"description":      desc,
 				"account_name":     e.AccountName,
 				"account_id":       e.AccountID,
 				"pending":          e.Pending,
@@ -991,13 +1005,26 @@ func (h *DashboardHandler) GetCreditCardLedger(c *gin.Context) {
 		allEntries = append(allEntries, e)
 	}
 
+	// ── Step 3b: Load overrides for description enrichment ──
+	var ccOverrides []models.ReconciliationOverride
+	h.GormDB.Find(&ccOverrides)
+	ccOverrideMap := map[string]models.ReconciliationOverride{}
+	for _, o := range ccOverrides {
+		ccOverrideMap[o.PlaidID] = o
+	}
+
 	// ── Step 4: Apply search / account_owner display filters ──
 	var filtered []ledgerEntry
 	for _, e := range allEntries {
+		// Build effective description for search
+		desc := e.MerchantName
+		if ov, ok := ccOverrideMap[e.PlaidID]; ok && ov.Description != "" {
+			desc = ov.Description
+		}
 		if search != "" {
 			lower := strings.ToLower(search)
-			if !strings.Contains(strings.ToLower(e.Vendor), lower) &&
-				!strings.Contains(strings.ToLower(e.Name), lower) &&
+			if !strings.Contains(strings.ToLower(e.Name), lower) &&
+				!strings.Contains(strings.ToLower(desc), lower) &&
 				!strings.Contains(strings.ToLower(e.MerchantName), lower) {
 				continue
 			}
@@ -1060,14 +1087,19 @@ func (h *DashboardHandler) GetCreditCardLedger(c *gin.Context) {
 	ledger := []gin.H{}
 	if offset < len(filtered) {
 		for _, e := range filtered[offset:end] {
+			// Description = override description > merchant_name
+			desc := e.MerchantName
+			if ov, ok := ccOverrideMap[e.PlaidID]; ok && ov.Description != "" {
+				desc = ov.Description
+			}
 			entry := gin.H{
 				"id":               e.ID,
 				"plaid_id":         e.PlaidID,
 				"date":             e.Date,
 				"amount":           round2(e.Amount),
-				"vendor":           e.Vendor,
+				"vendor":           e.Name,         // vendor = raw Plaid name
 				"name":             e.Name,
-				"transaction_type": e.TxType,
+				"description":      desc,            // override description or merchant_name
 				"merchant_name":    e.MerchantName,
 				"account_name":     e.AccountName,
 				"account_id":       e.AccountID,
