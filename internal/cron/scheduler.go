@@ -21,18 +21,20 @@ func Start(gormDB *gorm.DB, cfg *config.Config) *cron.Cron {
 
 	c := cron.New()
 
-	// Every 15 minutes: bank transactions and invoices (incremental)
-	c.AddFunc("*/15 * * * *", wrapJob(h, "bank-transactions", h.SyncBankTransactions))
-	c.AddFunc("*/15 * * * *", wrapJob(h, "invoices", h.SyncInvoices))
+	// Every 30 minutes: bank transactions and invoices (incremental)
+	c.AddFunc("*/30 * * * *", wrapJob(h, "bank-transactions", h.SyncBankTransactions))
+	c.AddFunc("*/30 * * * *", wrapJob(h, "invoices", h.SyncInvoices))
 
 	// Every 30 minutes: payments, contacts (incremental)
 	c.AddFunc("*/30 * * * *", wrapJob(h, "payments", h.SyncPayments))
 	c.AddFunc("*/30 * * * *", wrapJob(h, "contacts", h.SyncContacts))
 
-	// Every 60 minutes: journals, tracking categories, accounts (incremental)
+	// Every 60 minutes: journals, tracking categories (at :00)
 	c.AddFunc("0 * * * *", wrapJob(h, "journals", h.SyncManualJournals))
 	c.AddFunc("0 * * * *", wrapJob(h, "tracking-categories", h.SyncTrackingCategories))
-	c.AddFunc("0 * * * *", wrapJob(h, "accounts", h.SyncAccounts))
+
+	// Accounts sync at :05 past each hour (staggered to avoid rate limit contention)
+	c.AddFunc("5 * * * *", wrapJob(h, "accounts", h.SyncAccounts))
 
 	// Daily at 2am: full resync — clears sync state and re-fetches everything
 	c.AddFunc("0 2 * * *", wrapSyncAll(h))
