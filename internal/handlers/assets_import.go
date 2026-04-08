@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -86,9 +87,9 @@ func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 		findErr := h.GormDB.Where("asset_number = ?", assetNumber).First(&asset).Error
 		isNew := findErr != nil
 
-		// Always set all fields
-		asset.XeroID = fmt.Sprintf("csv-import-%s", assetNumber)
-		asset.TenantID = "csv-import"
+		// Always set all fields — use actual DB column struct fields
+		asset.XeroID = fmt.Sprintf("csv-%s", assetNumber)
+		asset.TenantID = ""
 		asset.AssetNumber = &an
 		asset.AssetName = csvGet(row, colIdx, "AssetName")
 		asset.SyncedAt = time.Now()
@@ -97,7 +98,6 @@ func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 			asset.Status = &v
 		}
 		if v := csvGet(row, colIdx, "AssetType"); v != "" {
-			asset.AssetType = v
 			asset.AssetTypeName = &v
 		}
 		if v := csvGet(row, colIdx, "Description"); v != "" {
@@ -112,13 +112,18 @@ func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 
 		asset.PurchasePrice = csvParseFloat(csvGet(row, colIdx, "PurchasePrice"))
 		asset.DepreciationRate = csvParseFloat(csvGet(row, colIdx, "Book_Rate"))
-		asset.EffectiveLife = csvParseFloat(csvGet(row, colIdx, "Book_EffectiveLife"))
 		asset.BookValue = csvParseFloat(csvGet(row, colIdx, "Book_BookValue"))
 		asset.ResidualValue = csvParseFloat(csvGet(row, colIdx, "Book_ResidualValue"))
-		asset.AccumulatedDepreciation = csvParseFloat(csvGet(row, colIdx, "AccumulatedDepreciation"))
+		asset.CurrentAccumDepreciation = csvParseFloat(csvGet(row, colIdx, "AccumulatedDepreciation"))
 		asset.PurchaseDate = csvParseDate(csvGet(row, colIdx, "PurchaseDate"))
 		asset.DepreciationStartDate = csvParseDate(csvGet(row, colIdx, "Book_DepreciationStartDate"))
 		asset.DisposalDate = csvParseDate(csvGet(row, colIdx, "DisposalDate"))
+
+		// EffectiveLife: CSV float → model *int
+		if v := csvParseFloat(csvGet(row, colIdx, "Book_EffectiveLife")); v != nil {
+			years := int(math.Round(*v))
+			asset.EffectiveLifeYears = &years
+		}
 
 		if isNew {
 			if err := h.GormDB.Create(&asset).Error; err != nil {
