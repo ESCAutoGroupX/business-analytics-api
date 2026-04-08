@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -359,6 +360,266 @@ func (h *PlaidHandler) DeletePlaidItem(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Plaid item disconnected"})
+}
+
+// SyncPlaidTransactions runs as a cron job — syncs transactions for every
+// plaid_item using the cursor-based /transactions/sync endpoint.  Items with
+// a NULL/empty cursor get an initial full sync (up to 730 days).
+func (h *PlaidHandler) SyncPlaidTransactions() {
+	var items []models.PlaidItem
+	if err := h.GormDB.Find(&items).Error; err != nil {
+		log.Printf("PlaidSync: failed to query plaid_items: %v", err)
+		return
+	}
+	if len(items) == 0 {
+		return
+	}
+
+	for i, item := range items {
+		totalAdded, totalModified, totalRemoved := 0, 0, 0
+		cursor := item.Cursor
+		hasMore := true
+
+		for hasMore {
+			reqBody := map[string]interface{}{
+				"access_token": item.AccessToken,
+			}
+			if cursor != "" {
+				reqBody["cursor"] = cursor
+			}
+
+			result, err := h.plaidRequest("/transactions/sync", reqBody)
+			if err != nil {
+				log.Printf("PlaidSync: %s (id=%d): API error: %v", item.InstitutionName, item.ID, err)
+				break
+			}
+
+			// Build account_id → metadata lookup from accounts array
+			acctMeta := map[string]struct{ Name, Type, Subtype string }{}
+			if accounts, ok := result["accounts"].([]interface{}); ok {
+				for _, a := range accounts {
+					acct, _ := a.(map[string]interface{})
+					aid, _ := acct["account_id"].(string)
+					aname, _ := acct["name"].(string)
+					atype, _ := acct["type"].(string)
+					asub, _ := acct["subtype"].(string)
+					acctMeta[aid] = struct{ Name, Type, Subtype string }{aname, atype, asub}
+				}
+			}
+
+			// Process added transactions
+			if added, ok := result["added"].([]interface{}); ok {
+				for _, t := range added {
+					h.upsertPlaidTransaction(t, acctMeta)
+				}
+				totalAdded += len(added)
+			}
+
+			// Process modified transactions
+			if modified, ok := result["modified"].([]interface{}); ok {
+				for _, t := range modified {
+					h.upsertPlaidTransaction(t, acctMeta)
+				}
+				totalModified += len(modified)
+			}
+
+			// Process removed transactions
+			if removed, ok := result["removed"].([]interface{}); ok {
+				for _, r := range removed {
+					rm, _ := r.(map[string]interface{})
+					if txID, ok := rm["transaction_id"].(string); ok && txID != "" {
+						h.GormDB.Where("plaid_id = ?", txID).Delete(&models.Transaction{})
+					}
+				}
+				totalRemoved += len(removed)
+			}
+
+			// Advance cursor
+			if nc, ok := result["next_cursor"].(string); ok && nc != "" {
+				cursor = nc
+			}
+			if hm, ok := result["has_more"].(bool); ok {
+				hasMore = hm
+			} else {
+				hasMore = false
+			}
+		}
+
+		// Persist cursor
+		if cursor != items[i].Cursor {
+			h.GormDB.Model(&items[i]).Update("cursor", cursor)
+		}
+
+		if totalAdded > 0 || totalModified > 0 || totalRemoved > 0 {
+			log.Printf("PlaidSync: %s (id=%d): +%d added, ~%d modified, -%d removed",
+				item.InstitutionName, item.ID, totalAdded, totalModified, totalRemoved)
+		}
+	}
+}
+
+// upsertPlaidTransaction maps a single Plaid transaction JSON object to the
+// Transaction model and upserts it by plaid_id.
+func (h *PlaidHandler) upsertPlaidTransaction(
+	t interface{},
+	acctMeta map[string]struct{ Name, Type, Subtype string },
+) {
+	tx, ok := t.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	plaidID := plaidStr(tx, "transaction_id")
+	if plaidID == nil || *plaidID == "" {
+		return
+	}
+
+	accountID := plaidStr(tx, "account_id")
+	var acctName, acctType, acctSubtype *string
+	if accountID != nil {
+		if meta, ok := acctMeta[*accountID]; ok {
+			acctName = &meta.Name
+			acctType = &meta.Type
+			acctSubtype = &meta.Subtype
+		}
+	}
+
+	pending := plaidBool(tx, "pending")
+	source := "plaid"
+
+	rec := models.Transaction{
+		PlaidID:             plaidID,
+		AccountID:           accountID,
+		Date:                plaidStr(tx, "date"),
+		AuthorizedDate:      plaidStr(tx, "authorized_date"),
+		Amount:              plaidFloat(tx, "amount"),
+		CurrencyISO:         plaidStr(tx, "iso_currency_code"),
+		Name:                plaidStr(tx, "name"),
+		MerchantName:        plaidStr(tx, "merchant_name"),
+		MerchantEntityID:    plaidStr(tx, "merchant_entity_id"),
+		Website:             plaidStr(tx, "website"),
+		LogoURL:             plaidStr(tx, "logo_url"),
+		PaymentChannel:      plaidStr(tx, "payment_channel"),
+		TransactionType:     plaidStr(tx, "transaction_type"),
+		TransactionCode:     plaidStr(tx, "transaction_code"),
+		Pending:             pending,
+		PendingID:           plaidStr(tx, "pending_transaction_id"),
+		AccountOwner:        plaidStr(tx, "account_owner"),
+		CheckNumber:         plaidStr(tx, "check_number"),
+		Category:            plaidJSON(tx, "category"),
+		PersonalFinanceCategory: plaidJSON(tx, "personal_finance_category"),
+		Location:            plaidJSON(tx, "location"),
+		Counterparties:      plaidJSON(tx, "counterparties"),
+		PaymentMeta:         plaidJSON(tx, "payment_meta"),
+		AccountName:         acctName,
+		AccountType:         acctType,
+		AccountSubtype:      acctSubtype,
+		Source:              &source,
+	}
+
+	// Upsert: insert or update on plaid_id conflict
+	h.GormDB.Exec(`
+		INSERT INTO transactions (
+			plaid_id, account_id, date, authorized_date, amount,
+			currency_iso, name, merchant_name, merchant_entity_id,
+			website, logo_url, payment_channel, transaction_type,
+			transaction_code, pending, pending_id, account_owner,
+			check_number, category, personal_finance_category,
+			location, counterparties, payment_meta,
+			account_name, account_type, account_subtype, source
+		) VALUES (
+			?, ?, ?, ?, ?,
+			?, ?, ?, ?,
+			?, ?, ?, ?,
+			?, ?, ?, ?,
+			?, ?, ?,
+			?, ?, ?,
+			?, ?, ?, ?
+		)
+		ON CONFLICT (plaid_id) DO UPDATE SET
+			account_id = EXCLUDED.account_id,
+			date = EXCLUDED.date,
+			authorized_date = EXCLUDED.authorized_date,
+			amount = EXCLUDED.amount,
+			currency_iso = EXCLUDED.currency_iso,
+			name = EXCLUDED.name,
+			merchant_name = EXCLUDED.merchant_name,
+			merchant_entity_id = EXCLUDED.merchant_entity_id,
+			website = EXCLUDED.website,
+			logo_url = EXCLUDED.logo_url,
+			payment_channel = EXCLUDED.payment_channel,
+			transaction_type = EXCLUDED.transaction_type,
+			transaction_code = EXCLUDED.transaction_code,
+			pending = EXCLUDED.pending,
+			pending_id = EXCLUDED.pending_id,
+			account_owner = EXCLUDED.account_owner,
+			check_number = EXCLUDED.check_number,
+			category = EXCLUDED.category,
+			personal_finance_category = EXCLUDED.personal_finance_category,
+			location = EXCLUDED.location,
+			counterparties = EXCLUDED.counterparties,
+			payment_meta = EXCLUDED.payment_meta,
+			account_name = EXCLUDED.account_name,
+			account_type = EXCLUDED.account_type,
+			account_subtype = EXCLUDED.account_subtype,
+			source = EXCLUDED.source,
+			updated_at = NOW()
+	`,
+		rec.PlaidID, rec.AccountID, rec.Date, rec.AuthorizedDate, rec.Amount,
+		rec.CurrencyISO, rec.Name, rec.MerchantName, rec.MerchantEntityID,
+		rec.Website, rec.LogoURL, rec.PaymentChannel, rec.TransactionType,
+		rec.TransactionCode, rec.Pending, rec.PendingID, rec.AccountOwner,
+		rec.CheckNumber, rec.Category, rec.PersonalFinanceCategory,
+		rec.Location, rec.Counterparties, rec.PaymentMeta,
+		rec.AccountName, rec.AccountType, rec.AccountSubtype, rec.Source,
+	)
+}
+
+// ── Plaid JSON field helpers ─────────────────────────────────────────────
+
+func plaidStr(m map[string]interface{}, key string) *string {
+	if v, ok := m[key].(string); ok {
+		return &v
+	}
+	return nil
+}
+
+func plaidFloat(m map[string]interface{}, key string) *float64 {
+	if v, ok := m[key].(float64); ok {
+		return &v
+	}
+	return nil
+}
+
+func plaidBool(m map[string]interface{}, key string) *bool {
+	if v, ok := m[key].(bool); ok {
+		return &v
+	}
+	return nil
+}
+
+func plaidJSON(m map[string]interface{}, key string) *string {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	s := string(b)
+	return &s
+}
+
+// ── Plaid primary cardholder helper ──────────────────────────────────────
+
+// IsPrimaryCardholder returns true when the account_owner is the main
+// cardholder (ROBERT…SALADNA) or is empty/null — i.e. NOT a sub-card.
+func IsPrimaryCardholder(owner string) bool {
+	if owner == "" {
+		return true
+	}
+	upper := strings.ToUpper(owner)
+	return strings.Contains(upper, "ROBERT") && strings.Contains(upper, "SALADNA")
 }
 
 // POST /plaid/sandbox/connect-bank

@@ -1150,12 +1150,13 @@ func (h *DashboardHandler) GetCredit(c *gin.Context) {
 		Amount    float64
 	}
 
-	// Gather all transactions for all CC accounts
+	// Gather all transactions for all CC accounts — only primary cardholder
 	allTx := []txEntry{}
 	for _, pm := range pms {
 		txRows, err := h.sqlDB().QueryContext(ctx,
 			`SELECT COALESCE(date::text, ''), COALESCE(amount, 0)
 			 FROM transactions WHERE account_type = 'credit' AND account_id = $1
+			   AND (account_owner IS NULL OR account_owner = '' OR UPPER(account_owner) LIKE '%ROBERT%SALADNA%')
 			 ORDER BY date, created_at`, pm.ID)
 		if err != nil {
 			continue
@@ -1238,15 +1239,20 @@ func (h *DashboardHandler) GetCreditCardsDueSoon(c *gin.Context) {
 	thirtyDaysLater := now.AddDate(0, 0, 30)
 
 	rows, err := h.sqlDB().QueryContext(ctx,
-		`SELECT id, COALESCE(plaid_account_id, ''), COALESCE(title, ''), COALESCE(card_name, ''),
-		        COALESCE(card_last_4_digits, ''), COALESCE(balance_available, 0),
-		        COALESCE(balance_current, 0), COALESCE(credit_limit, 0),
-		        next_payment_due_date
-		 FROM payment_methods
-		 WHERE method_type = 'CREDIT_CARD'
-		   AND next_payment_due_date IS NOT NULL
-		   AND next_payment_due_date <= $1
-		 ORDER BY next_payment_due_date`, thirtyDaysLater)
+		`SELECT pm.id, COALESCE(pm.plaid_account_id, ''), COALESCE(pm.title, ''), COALESCE(pm.card_name, ''),
+		        COALESCE(pm.card_last_4_digits, ''), COALESCE(pm.balance_available, 0),
+		        COALESCE(pm.balance_current, 0), COALESCE(pm.credit_limit, 0),
+		        pm.next_payment_due_date
+		 FROM payment_methods pm
+		 WHERE pm.method_type = 'CREDIT_CARD'
+		   AND pm.next_payment_due_date IS NOT NULL
+		   AND pm.next_payment_due_date <= $1
+		   AND (
+		     NOT EXISTS (SELECT 1 FROM transactions t WHERE t.account_id = pm.id AND t.account_type = 'credit')
+		     OR EXISTS (SELECT 1 FROM transactions t WHERE t.account_id = pm.id AND t.account_type = 'credit'
+		                AND (t.account_owner IS NULL OR t.account_owner = '' OR UPPER(t.account_owner) LIKE '%ROBERT%SALADNA%'))
+		   )
+		 ORDER BY pm.next_payment_due_date`, thirtyDaysLater)
 	if err != nil {
 		log.Printf("ERROR: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query credit cards", "error": err.Error()})

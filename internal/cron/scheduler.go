@@ -36,6 +36,9 @@ func Start(gormDB *gorm.DB, cfg *config.Config) *cron.Cron {
 	// Daily at 2am: full resync — clears sync state and re-fetches everything
 	c.AddFunc("0 2 * * *", wrapSyncAll(h))
 
+	// Every 15 minutes: Plaid transaction sync (cursor-based)
+	c.AddFunc("*/15 * * * *", wrapSimpleJob("plaid-tx-sync", plaid.SyncPlaidTransactions))
+
 	// Daily balance snapshot at 11pm
 	c.AddFunc("0 23 * * *", wrapSimpleJob("balance-snapshot", plaid.TakeDailyBalanceSnapshot))
 
