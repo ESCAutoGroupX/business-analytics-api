@@ -13,12 +13,12 @@ type RateLimiter struct {
 	callsThisMinute int
 	windowStart     time.Time
 	callsToday      int
-	dailyDate       time.Time
+	dailyCallDate   string // "2006-01-02" UTC date string
 }
 
 var globalLimiter = &RateLimiter{
-	windowStart: time.Now(),
-	dailyDate:   time.Now().Truncate(24 * time.Hour),
+	windowStart:   time.Now(),
+	dailyCallDate: time.Now().UTC().Format("2006-01-02"),
 }
 
 // GetRateLimiter returns the singleton rate limiter.
@@ -33,11 +33,11 @@ func (rl *RateLimiter) WaitForSlot() bool {
 		rl.mu.Lock()
 		now := time.Now()
 
-		// Reset daily counter on new day
-		today := now.Truncate(24 * time.Hour)
-		if today.After(rl.dailyDate) {
+		// Reset daily counter on new day (UTC string comparison)
+		today := now.UTC().Format("2006-01-02")
+		if rl.dailyCallDate != today {
 			rl.callsToday = 0
-			rl.dailyDate = today
+			rl.dailyCallDate = today
 		}
 
 		// Check daily limit (leave 200-call buffer from Xero's 5000 limit)
