@@ -169,7 +169,10 @@ func (h *XeroAPIHandler) ListAssets(c *gin.Context) {
 		query = query.Where("status = ?", v)
 	}
 	if v := c.Query("asset_type"); v != "" {
-		query = query.Where("asset_type_name ILIKE ?", "%"+v+"%")
+		query = query.Where("asset_type_name ILIKE ? OR asset_type ILIKE ?", "%"+v+"%", "%"+v+"%")
+	}
+	if v := c.Query("location"); v != "" {
+		query = query.Where("location ILIKE ?", "%"+v+"%")
 	}
 
 	var total int64

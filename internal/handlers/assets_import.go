@@ -3,154 +3,122 @@ package handlers
 import (
 	"encoding/csv"
 	"fmt"
-	"math"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
-
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
+
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
 type AssetImportHandler struct {
 	GormDB *gorm.DB
 }
 
+// POST /xero/assets/import-csv
 func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 	file, _, err := c.Request.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no file uploaded"})
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "file is required"})
 		return
 	}
 	defer file.Close()
 
 	reader := csv.NewReader(file)
-	records, err := reader.ReadAll()
+	headers, err := reader.Read()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid CSV: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "failed to read CSV headers"})
 		return
 	}
 
-	if len(records) < 2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV has no data rows"})
-		return
-	}
-
-	// Build header index map
-	header := records[0]
-	colIdx := make(map[string]int)
-	for i, h := range header {
+	colIdx := map[string]int{}
+	for i, h := range headers {
 		colIdx[strings.TrimSpace(h)] = i
 	}
 
-	// Validate required column
 	if _, ok := colIdx["AssetNumber"]; !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV missing required column: AssetNumber"})
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "CSV must contain AssetNumber column"})
 		return
 	}
 
-	var imported int
-	var errors []string
+	imported := 0
+	var importErrors []string
+	rowNum := 1
 
-	for i, row := range records[1:] {
-		rowNum := i + 2 // 1-indexed, skip header
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		rowNum++
+		if err != nil {
+			importErrors = append(importErrors, fmt.Sprintf("row %d: %v", rowNum, err))
+			continue
+		}
 
-		assetNumber := getCol(row, colIdx, "AssetNumber")
+		assetNumber := csvGet(row, colIdx, "AssetNumber")
 		if assetNumber == "" {
-			errors = append(errors, fmt.Sprintf("row %d: empty AssetNumber, skipping", rowNum))
+			importErrors = append(importErrors, fmt.Sprintf("row %d: empty AssetNumber", rowNum))
 			continue
 		}
 
-		asset := models.XeroAsset{
-			AssetName: getCol(row, colIdx, "AssetName"),
+		status := csvGet(row, colIdx, "AssetStatus")
+		depMethod := csvGet(row, colIdx, "Book_DepreciationMethod")
+		description := csvGet(row, colIdx, "Description")
+		location := csvGet(row, colIdx, "TrackingOption1")
+		assetTypeName := csvGet(row, colIdx, "AssetType")
+
+		fields := map[string]interface{}{
+			"xero_id":                 fmt.Sprintf("csv-import-%s", assetNumber),
+			"tenant_id":               "csv-import",
+			"asset_name":              csvGet(row, colIdx, "AssetName"),
+			"status":                  csvNilIfEmpty(status),
+			"purchase_date":           csvParseDate(csvGet(row, colIdx, "PurchaseDate")),
+			"purchase_price":          csvParseFloat(csvGet(row, colIdx, "PurchasePrice")),
+			"asset_type":              csvGet(row, colIdx, "AssetType"),
+			"asset_type_name":         csvNilIfEmpty(assetTypeName),
+			"description":             csvNilIfEmpty(description),
+			"location":                csvNilIfEmpty(location),
+			"depreciation_method":     csvNilIfEmpty(depMethod),
+			"depreciation_rate":       csvParseFloat(csvGet(row, colIdx, "Book_Rate")),
+			"effective_life":          csvParseFloat(csvGet(row, colIdx, "Book_EffectiveLife")),
+			"book_value":              csvParseFloat(csvGet(row, colIdx, "Book_BookValue")),
+			"residual_value":          csvParseFloat(csvGet(row, colIdx, "Book_ResidualValue")),
+			"accumulated_depreciation": csvParseFloat(csvGet(row, colIdx, "AccumulatedDepreciation")),
+			"depreciation_start_date": csvParseDate(csvGet(row, colIdx, "Book_DepreciationStartDate")),
+			"disposal_date":           csvParseDate(csvGet(row, colIdx, "DisposalDate")),
+			"synced_at":               time.Now(),
 		}
 
-		// String pointer fields
-		an := assetNumber
-		asset.AssetNumber = &an
-
-		if v := getCol(row, colIdx, "AssetStatus"); v != "" {
-			asset.Status = &v
-		}
-		if v := getCol(row, colIdx, "AssetType"); v != "" {
-			asset.AssetTypeName = &v
-		}
-		if v := getCol(row, colIdx, "Description"); v != "" {
-			asset.Description = &v
-		}
-		if v := getCol(row, colIdx, "TrackingOption1"); v != "" {
-			asset.Location = &v
-		}
-		if v := getCol(row, colIdx, "Book_DepreciationMethod"); v != "" {
-			asset.DepreciationMethod = &v
-		}
-
-		// Float pointer fields
-		if v := parseFloat(getCol(row, colIdx, "PurchasePrice")); v != nil {
-			asset.PurchasePrice = v
-		}
-		if v := parseFloat(getCol(row, colIdx, "Book_Rate")); v != nil {
-			asset.DepreciationRate = v
-		}
-		if v := parseFloat(getCol(row, colIdx, "Book_BookValue")); v != nil {
-			asset.BookValue = v
-		}
-		if v := parseFloat(getCol(row, colIdx, "Book_ResidualValue")); v != nil {
-			asset.ResidualValue = v
-		}
-		if v := parseFloat(getCol(row, colIdx, "AccumulatedDepreciation")); v != nil {
-			asset.CurrentAccumDepreciation = v
-		}
-
-		// EffectiveLife: float in CSV -> int in model
-		if v := parseFloat(getCol(row, colIdx, "Book_EffectiveLife")); v != nil {
-			years := int(math.Round(*v))
-			asset.EffectiveLifeYears = &years
-		}
-
-		// Date fields (M/D/YYYY format)
-		if v := parseDate(getCol(row, colIdx, "PurchaseDate")); v != nil {
-			asset.PurchaseDate = v
-		}
-		if v := parseDate(getCol(row, colIdx, "DisposalDate")); v != nil {
-			asset.DisposalDate = v
-		}
-		if v := parseDate(getCol(row, colIdx, "Book_DepreciationStartDate")); v != nil {
-			asset.DepreciationStartDate = v
-		}
-
-		asset.SyncedAt = time.Now()
-
-		// Upsert: ON CONFLICT (asset_number) DO UPDATE
-		result := h.GormDB.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "asset_number"}},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"asset_name", "status", "asset_type_name", "description", "location",
-				"purchase_date", "purchase_price", "depreciation_method",
-				"depreciation_rate", "effective_life_years", "book_value",
-				"residual_value", "current_accum_depreciation",
-				"depreciation_start_date", "disposal_date", "synced_at",
-			}),
-		}).Create(&asset)
-
-		if result.Error != nil {
-			errors = append(errors, fmt.Sprintf("row %d (%s): %s", rowNum, assetNumber, result.Error.Error()))
-			continue
+		// Upsert: find by asset_number, update or create
+		var existing models.XeroAsset
+		result := h.GormDB.Where("asset_number = ?", assetNumber).First(&existing)
+		if result.Error == nil {
+			if err := h.GormDB.Model(&existing).Updates(fields).Error; err != nil {
+				importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, err))
+				continue
+			}
+		} else {
+			fields["asset_number"] = assetNumber
+			if err := h.GormDB.Model(&models.XeroAsset{}).Create(fields).Error; err != nil {
+				importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, err))
+				continue
+			}
 		}
 		imported++
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"imported": imported,
-		"errors":   errors,
+		"errors":   importErrors,
 	})
 }
 
-func getCol(row []string, idx map[string]int, col string) string {
+func csvGet(row []string, idx map[string]int, col string) string {
 	i, ok := idx[col]
 	if !ok || i >= len(row) {
 		return ""
@@ -158,31 +126,36 @@ func getCol(row []string, idx map[string]int, col string) string {
 	return strings.TrimSpace(row[i])
 }
 
-func parseFloat(s string) *float64 {
+func csvParseDate(s string) *time.Time {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil
 	}
-	// Remove commas from numbers like "1,234.56"
-	s = strings.ReplaceAll(s, ",", "")
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return nil
-	}
-	return &v
-}
-
-func parseDate(s string) *time.Time {
-	if s == "" {
-		return nil
-	}
-	// Try M/D/YYYY format
-	t, err := time.Parse("1/2/2006", s)
-	if err != nil {
-		// Try YYYY-MM-DD as fallback
-		t, err = time.Parse("2006-01-02", s)
-		if err != nil {
-			return nil
+	for _, layout := range []string{"1/2/2006", "01/02/2006", "2006-01-02", "1/2/06"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return &t
 		}
 	}
-	return &t
+	return nil
+}
+
+func csvParseFloat(s string) *float64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	s = strings.ReplaceAll(s, ",", "")
+	s = strings.ReplaceAll(s, "$", "")
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil
+	}
+	return &f
+}
+
+func csvNilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
