@@ -649,6 +649,13 @@ type XeroAsset struct {
 	AssetType                string     `gorm:"column:asset_type" json:"asset_type"`
 	EffectiveLife            *float64   `gorm:"column:effective_life" json:"effective_life"`
 	AccumulatedDepreciation  *float64   `gorm:"column:accumulated_depreciation" json:"accumulated_depreciation"`
+	UsefulLifeYearsOverride    *int       `gorm:"column:useful_life_years_override" json:"useful_life_years_override"`
+	DepreciationMethodOverride *string    `gorm:"column:depreciation_method_override" json:"depreciation_method_override"`
+	DepreciationRateOverride   *float64   `gorm:"column:depreciation_rate_override" json:"depreciation_rate_override"`
+	AssetCategory            *string    `gorm:"column:asset_category" json:"asset_category"`
+	AIClassified             bool       `gorm:"column:ai_classified;default:false" json:"ai_classified"`
+	AIConfidence             *float64   `gorm:"column:ai_confidence" json:"ai_confidence"`
+	AIReasoning              *string    `gorm:"column:ai_reasoning" json:"ai_reasoning"`
 	SyncedAt                 time.Time  `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
 }
 

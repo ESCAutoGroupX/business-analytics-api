@@ -27,6 +27,7 @@ type Config struct {
 	SMTPUser               string
 	SMTPPass               string
 	SMTPFrom               string
+	AnthropicAPIKey        string
 }
 
 func Load() *Config {
@@ -59,5 +60,6 @@ func Load() *Config {
 		SMTPUser:               os.Getenv("SMTP_USER"),
 		SMTPPass:               os.Getenv("SMTP_PASS"),
 		SMTPFrom:               os.Getenv("SMTP_FROM"),
+		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),
 	}
 }
