@@ -37,7 +37,11 @@ func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 
 	colIdx := map[string]int{}
 	for i, h := range headers {
-		colIdx[strings.TrimSpace(h)] = i
+		h = strings.TrimSpace(h)
+		h = strings.Trim(h, "\"")
+		h = strings.TrimPrefix(h, "*")
+		h = strings.TrimSpace(h)
+		colIdx[h] = i
 	}
 
 	if _, ok := colIdx["AssetNumber"]; !ok {
