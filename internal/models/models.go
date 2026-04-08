@@ -621,10 +621,10 @@ func (XeroPayment) TableName() string { return "xero_payments" }
 
 type XeroAsset struct {
 	ID                       int        `gorm:"primaryKey;autoIncrement" json:"id"`
-	XeroID                   string     `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	XeroID                   string     `gorm:"column:xero_id;uniqueIndex" json:"xero_id"`
 	TenantID                 string     `gorm:"column:tenant_id;not null" json:"tenant_id"`
 	AssetName                string     `gorm:"column:asset_name;not null" json:"asset_name"`
-	AssetNumber              *string    `gorm:"column:asset_number" json:"asset_number"`
+	AssetNumber              *string    `gorm:"column:asset_number;uniqueIndex" json:"asset_number"`
 	AssetTypeID              *string    `gorm:"column:asset_type_id" json:"asset_type_id"`
 	AssetTypeName            *string    `gorm:"column:asset_type_name" json:"asset_type_name"`
 	Status                   *string    `gorm:"column:status" json:"status"`
@@ -643,6 +643,12 @@ type XeroAsset struct {
 	PriorAccumDepreciation   *float64   `gorm:"column:prior_accum_depreciation" json:"prior_accum_depreciation"`
 	CurrentDepreciation      *float64   `gorm:"column:current_depreciation" json:"current_depreciation"`
 	UpdatedDateUTC           *time.Time `gorm:"column:updated_date_utc" json:"updated_date_utc"`
+	Description              *string    `gorm:"column:description" json:"description"`
+	Location                 *string    `gorm:"column:location" json:"location"`
+	DepreciationStartDate    *time.Time `gorm:"column:depreciation_start_date" json:"depreciation_start_date"`
+	AssetType                string     `gorm:"column:asset_type" json:"asset_type"`
+	EffectiveLife            *float64   `gorm:"column:effective_life" json:"effective_life"`
+	AccumulatedDepreciation  *float64   `gorm:"column:accumulated_depreciation" json:"accumulated_depreciation"`
 	SyncedAt                 time.Time  `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
 }
 
