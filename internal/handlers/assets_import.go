@@ -78,27 +78,20 @@ func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 			continue
 		}
 
-		// Find or create by asset_number
-		var asset models.XeroAsset
-		result := h.GormDB.Where("asset_number = ?", assetNumber).FirstOrCreate(&asset)
-		if result.Error != nil {
-			log.Printf("Asset import error for %s (FirstOrCreate): %v", assetNumber, result.Error)
-			importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, result.Error))
-			continue
-		}
-
-		// Populate XeroID and TenantID if new record
-		if asset.XeroID == "" {
-			asset.XeroID = fmt.Sprintf("csv-import-%s", assetNumber)
-		}
-		if asset.TenantID == "" {
-			asset.TenantID = "csv-import"
-		}
-
-		// Update all fields from CSV
+		// Build the asset struct with all fields populated
 		an := assetNumber
+		var asset models.XeroAsset
+
+		// Look up existing record
+		findErr := h.GormDB.Where("asset_number = ?", assetNumber).First(&asset).Error
+		isNew := findErr != nil
+
+		// Always set all fields
+		asset.XeroID = fmt.Sprintf("csv-import-%s", assetNumber)
+		asset.TenantID = "csv-import"
 		asset.AssetNumber = &an
 		asset.AssetName = csvGet(row, colIdx, "AssetName")
+		asset.SyncedAt = time.Now()
 
 		if v := csvGet(row, colIdx, "AssetStatus"); v != "" {
 			asset.Status = &v
@@ -126,12 +119,19 @@ func (h *AssetImportHandler) ImportCSV(c *gin.Context) {
 		asset.PurchaseDate = csvParseDate(csvGet(row, colIdx, "PurchaseDate"))
 		asset.DepreciationStartDate = csvParseDate(csvGet(row, colIdx, "Book_DepreciationStartDate"))
 		asset.DisposalDate = csvParseDate(csvGet(row, colIdx, "DisposalDate"))
-		asset.SyncedAt = time.Now()
 
-		if err := h.GormDB.Save(&asset).Error; err != nil {
-			log.Printf("Asset import error for %s (Save): %v", assetNumber, err)
-			importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, err))
-			continue
+		if isNew {
+			if err := h.GormDB.Create(&asset).Error; err != nil {
+				log.Printf("Asset import error for %s (Create): %v", assetNumber, err)
+				importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, err))
+				continue
+			}
+		} else {
+			if err := h.GormDB.Save(&asset).Error; err != nil {
+				log.Printf("Asset import error for %s (Save): %v", assetNumber, err)
+				importErrors = append(importErrors, fmt.Sprintf("row %d (%s): %v", rowNum, assetNumber, err))
+				continue
+			}
 		}
 		imported++
 	}
