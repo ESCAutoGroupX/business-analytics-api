@@ -832,6 +832,308 @@ func (h *DashboardHandler) GetBankLedger(c *gin.Context) {
 	})
 }
 
+// GET /dashboard/credit-card-ledger
+func (h *DashboardHandler) GetCreditCardLedger(c *gin.Context) {
+	ctx := context.Background()
+
+	page := parseIntDefault(c.DefaultQuery("page", "1"), 1)
+	pageSize := parseIntDefault(c.DefaultQuery("page_size", "25"), 25)
+	sortBy := c.DefaultQuery("sort_by", "date")
+	sortOrder := c.DefaultQuery("sort_order", "desc")
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
+	search := c.Query("search")
+	accountID := c.Query("account_id")
+	accountOwner := c.Query("account_owner")
+
+	// ── Step 1: Get latest balance per credit account from daily_balance_snapshots ──
+	acctBalances := map[string]float64{}
+	acctAvailable := map[string]float64{}
+	balRows, err := h.sqlDB().QueryContext(ctx,
+		`SELECT DISTINCT ON (account_id) account_id, COALESCE(current_balance, 0), COALESCE(available_balance, 0)
+		 FROM daily_balance_snapshots
+		 WHERE account_type = 'credit' AND current_balance IS NOT NULL
+		 ORDER BY account_id, snapshot_date DESC`)
+	if err != nil {
+		log.Printf("ERROR: failed to query credit balance snapshots: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query balance snapshots", "error": err.Error()})
+		return
+	}
+	defer balRows.Close()
+	for balRows.Next() {
+		var aid string
+		var bal, avail float64
+		if err := balRows.Scan(&aid, &bal, &avail); err != nil {
+			log.Printf("ERROR: scanning credit balance snapshot row: %v", err)
+			continue
+		}
+		acctBalances[aid] = bal
+		acctAvailable[aid] = avail
+	}
+
+	// Build account names from transactions
+	acctNames := map[string]string{}
+	acctRows, err := h.sqlDB().QueryContext(ctx,
+		`SELECT DISTINCT ON (account_id) account_id, account_name
+		 FROM transactions WHERE account_type = 'credit' AND account_name != ''
+		 ORDER BY account_id, created_at DESC`)
+	if err != nil {
+		log.Printf("ERROR: failed to query credit account names: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query account names", "error": err.Error()})
+		return
+	}
+	defer acctRows.Close()
+	for acctRows.Next() {
+		var aid, aname string
+		if err := acctRows.Scan(&aid, &aname); err != nil {
+			log.Printf("ERROR: scanning credit account name row: %v", err)
+			continue
+		}
+		acctNames[aid] = aname
+	}
+
+	type ccAccount struct {
+		AccountID        string
+		AccountName      string
+		CurrentBalance   float64
+		AvailableBalance float64
+	}
+	var ccAccounts []ccAccount
+	for aid, bal := range acctBalances {
+		ccAccounts = append(ccAccounts, ccAccount{
+			AccountID:        aid,
+			AccountName:      acctNames[aid],
+			CurrentBalance:   bal,
+			AvailableBalance: acctAvailable[aid],
+		})
+	}
+
+	// ── Step 2: Load ALL credit transactions for running-balance calculation ──
+	balWhere := "WHERE account_type = 'credit'"
+	balArgs := []interface{}{}
+	balIdx := 1
+
+	if startDate != "" {
+		balWhere += fmt.Sprintf(" AND date >= $%d", balIdx)
+		balArgs = append(balArgs, startDate)
+		balIdx++
+	}
+	if endDate != "" {
+		balWhere += fmt.Sprintf(" AND date <= $%d", balIdx)
+		balArgs = append(balArgs, endDate)
+		balIdx++
+	}
+	if accountID != "" {
+		balWhere += fmt.Sprintf(" AND account_id = $%d", balIdx)
+		balArgs = append(balArgs, accountID)
+		balIdx++
+	}
+
+	allTxRows, err := h.sqlDB().QueryContext(ctx,
+		fmt.Sprintf(`SELECT id, COALESCE(plaid_id, ''), COALESCE(date::text, ''),
+		        COALESCE(amount, 0), COALESCE(vendor, ''), COALESCE(name, ''),
+		        COALESCE(transaction_type, ''), COALESCE(merchant_name, ''),
+		        COALESCE(account_name, ''), COALESCE(account_id, ''),
+		        COALESCE(pending, false), COALESCE(source, ''),
+		        COALESCE(account_owner, '')
+		 FROM transactions %s
+		 ORDER BY account_id, date DESC, created_at DESC`, balWhere), balArgs...)
+	if err != nil {
+		log.Printf("ERROR: failed to query credit transactions for ledger: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query transactions", "error": err.Error()})
+		return
+	}
+	defer allTxRows.Close()
+
+	// ── Step 3: Per-account running balance, walking newest-first ──
+	type ledgerEntry struct {
+		ID             string
+		PlaidID        string
+		Date           string
+		Amount         float64
+		Vendor         string
+		Name           string
+		TxType         string
+		MerchantName   string
+		AccountName    string
+		AccountID      string
+		Source         string
+		Pending        bool
+		AccountOwner   string
+		RunningBalance *float64
+	}
+
+	var allEntries []ledgerEntry
+	currentAcct := ""
+	var running float64
+
+	for allTxRows.Next() {
+		var e ledgerEntry
+		if err := allTxRows.Scan(&e.ID, &e.PlaidID, &e.Date, &e.Amount, &e.Vendor,
+			&e.Name, &e.TxType, &e.MerchantName, &e.AccountName, &e.AccountID,
+			&e.Pending, &e.Source, &e.AccountOwner); err != nil {
+			log.Printf("ERROR: scanning credit transaction row: %v", err)
+			continue
+		}
+
+		if e.AccountID != currentAcct {
+			currentAcct = e.AccountID
+			running = acctBalances[currentAcct]
+		}
+
+		if !e.Pending {
+			bal := round2(running)
+			e.RunningBalance = &bal
+			running -= e.Amount // Credit card: positive=charge increased balance, so undo by subtracting
+		}
+		// Pending transactions: RunningBalance stays nil
+
+		allEntries = append(allEntries, e)
+	}
+
+	// ── Step 4: Apply search / account_owner display filters ──
+	var filtered []ledgerEntry
+	for _, e := range allEntries {
+		if search != "" {
+			lower := strings.ToLower(search)
+			if !strings.Contains(strings.ToLower(e.Vendor), lower) &&
+				!strings.Contains(strings.ToLower(e.Name), lower) &&
+				!strings.Contains(strings.ToLower(e.MerchantName), lower) {
+				continue
+			}
+		}
+		if accountOwner != "" {
+			if !strings.HasSuffix(strings.TrimSpace(e.AccountOwner), accountOwner) {
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+
+	// ── Step 5: Count and pagination metadata ──
+	totalTransactions := len(filtered)
+	totalPages := int(math.Ceil(float64(totalTransactions) / float64(pageSize)))
+
+	// ── Step 6: Sort filtered entries ──
+	validSorts := map[string]string{
+		"date": "date", "amount": "amount", "vendor": "vendor",
+		"transaction_type": "transaction_type", "created_at": "created_at",
+		"name": "name",
+	}
+	sortCol := "date"
+	if v, ok := validSorts[sortBy]; ok {
+		sortCol = v
+	}
+	asc := strings.ToLower(sortOrder) == "asc"
+
+	switch sortCol {
+	case "amount":
+		sort.Slice(filtered, func(i, j int) bool {
+			if asc {
+				return filtered[i].Amount < filtered[j].Amount
+			}
+			return filtered[i].Amount > filtered[j].Amount
+		})
+	case "vendor":
+		sort.Slice(filtered, func(i, j int) bool {
+			if asc {
+				return strings.ToLower(filtered[i].Vendor) < strings.ToLower(filtered[j].Vendor)
+			}
+			return strings.ToLower(filtered[i].Vendor) > strings.ToLower(filtered[j].Vendor)
+		})
+	default:
+		sort.Slice(filtered, func(i, j int) bool {
+			if asc {
+				return filtered[i].Date < filtered[j].Date
+			}
+			return filtered[i].Date > filtered[j].Date
+		})
+	}
+
+	// ── Step 7: Paginate ──
+	offset := (page - 1) * pageSize
+	end := offset + pageSize
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+
+	ledger := []gin.H{}
+	if offset < len(filtered) {
+		for _, e := range filtered[offset:end] {
+			entry := gin.H{
+				"id":               e.ID,
+				"plaid_id":         e.PlaidID,
+				"date":             e.Date,
+				"amount":           round2(e.Amount),
+				"vendor":           e.Vendor,
+				"name":             e.Name,
+				"transaction_type": e.TxType,
+				"merchant_name":    e.MerchantName,
+				"account_name":     e.AccountName,
+				"account_id":       e.AccountID,
+				"pending":          e.Pending,
+				"source":           e.Source,
+				"account_owner":    e.AccountOwner,
+			}
+			if e.RunningBalance != nil {
+				entry["running_balance"] = *e.RunningBalance
+			} else {
+				entry["running_balance"] = nil
+			}
+			ledger = append(ledger, entry)
+		}
+	}
+
+	// ── Step 9: Compute summary ──
+	now := time.Now()
+	monthStart := fmt.Sprintf("%d-%02d-01", now.Year(), now.Month())
+	totalCharges := 0.0
+	totalPayments := 0.0
+	for _, e := range allEntries {
+		if e.Date >= monthStart && !e.Pending {
+			if e.Amount > 0 {
+				totalCharges += e.Amount
+			} else {
+				totalPayments += -e.Amount
+			}
+		}
+	}
+
+	totalBalance := 0.0
+	totalAvailable := 0.0
+	for _, a := range ccAccounts {
+		totalBalance += a.CurrentBalance
+		totalAvailable += a.AvailableBalance
+	}
+
+	accountsJSON := []gin.H{}
+	for _, a := range ccAccounts {
+		accountsJSON = append(accountsJSON, gin.H{
+			"account_id":        a.AccountID,
+			"account_name":      a.AccountName,
+			"current_balance":   round2(a.CurrentBalance),
+			"available_balance": round2(a.AvailableBalance),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"accounts":           accountsJSON,
+		"ledger":             ledger,
+		"total_transactions": totalTransactions,
+		"page":               page,
+		"page_size":          pageSize,
+		"total_pages":        totalPages,
+		"sort_by":            sortBy,
+		"sort_order":         sortOrder,
+		"summary": gin.H{
+			"total_charges_this_month":  round2(totalCharges),
+			"total_payments_this_month": round2(totalPayments),
+			"current_balance":           round2(totalBalance),
+			"available_credit":          round2(totalAvailable),
+		},
+	})
+}
+
 // GET /dashboard/vendor/:vendor_id/ledger
 func (h *DashboardHandler) GetVendorLedger(c *gin.Context) {
 	ctx := context.Background()

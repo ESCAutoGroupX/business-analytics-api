@@ -79,6 +79,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			dashboard.GET("/api/bank-balance-trans", dashboardHandler.GetBankBalanceTrans)
 			dashboard.GET("/api/bank-balance-trends", dashboardHandler.GetBankBalanceTrends)
 			dashboard.GET("/bank-ledger", dashboardHandler.GetBankLedger)
+			dashboard.GET("/credit-card-ledger", dashboardHandler.GetCreditCardLedger)
 			dashboard.GET("/vendor/:vendor_id/ledger", dashboardHandler.GetVendorLedger)
 			dashboard.GET("/credit-card-balances-monthly", dashboardHandler.GetCreditCardBalancesMonthly)
 			dashboard.GET("/credit-card-balances-weekly", dashboardHandler.GetCreditCardBalancesWeekly)
