@@ -178,6 +178,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		protected.GET("/xero/payments", xeroAPIHandler.ListPayments)
 		protected.GET("/xero/assets", xeroAPIHandler.ListAssets)
 		protected.POST("/xero/assets/import-csv", assetImportHandler.ImportCSV)
+		protected.POST("/xero/assets", assetImportHandler.CreateAsset)
 		protected.POST("/xero/assets/ai-classify", assetAIHandler.ClassifyAssets)
 		protected.POST("/xero/assets/calculate-depreciation", assetAIHandler.CalculateDepreciation)
 		protected.PATCH("/xero/assets/:id", assetAIHandler.PatchAsset)

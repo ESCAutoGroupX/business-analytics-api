@@ -17,6 +17,88 @@ import (
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
 
+type createAssetRequest struct {
+	AssetName          string   `json:"asset_name" binding:"required"`
+	AssetNumber        string   `json:"asset_number"`
+	PurchaseDate       string   `json:"purchase_date" binding:"required"`
+	PurchasePrice      float64  `json:"purchase_price" binding:"required"`
+	Location           string   `json:"location"`
+	AssetType          string   `json:"asset_type"`
+	Description        string   `json:"description"`
+	Status             string   `json:"status"`
+	DepreciationMethod string   `json:"depreciation_method"`
+	UsefulLife         *int     `json:"useful_life"`
+	ResidualValue      *float64 `json:"residual_value"`
+}
+
+// POST /xero/assets
+func (h *AssetImportHandler) CreateAsset(c *gin.Context) {
+	var req createAssetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
+
+	// Generate asset number if empty
+	if req.AssetNumber == "" {
+		var maxNum int
+		h.GormDB.Model(&models.XeroAsset{}).Select("COALESCE(MAX(CAST(SUBSTRING(asset_number FROM '[0-9]+$') AS INTEGER)), 0)").Where("asset_number LIKE 'FA-%'").Scan(&maxNum)
+		req.AssetNumber = fmt.Sprintf("FA-%04d", maxNum+1)
+	}
+
+	asset := models.XeroAsset{
+		XeroID:    fmt.Sprintf("manual-%s", req.AssetNumber),
+		TenantID:  "",
+		AssetName: req.AssetName,
+		SyncedAt:  time.Now(),
+	}
+
+	an := req.AssetNumber
+	asset.AssetNumber = &an
+
+	if req.Status != "" {
+		asset.Status = &req.Status
+	}
+	if req.AssetType != "" {
+		asset.AssetTypeName = &req.AssetType
+	}
+	if req.Description != "" {
+		asset.Description = &req.Description
+	}
+	if req.Location != "" {
+		asset.Location = &req.Location
+	}
+	if req.DepreciationMethod != "" {
+		asset.DepreciationMethodOverride = &req.DepreciationMethod
+	}
+
+	price := req.PurchasePrice
+	asset.PurchasePrice = &price
+
+	if req.ResidualValue != nil {
+		asset.ResidualValue = req.ResidualValue
+	}
+	if req.UsefulLife != nil {
+		asset.UsefulLifeYearsOverride = req.UsefulLife
+	}
+
+	// Parse purchase date
+	if t, err := time.Parse("2006-01-02", req.PurchaseDate); err == nil {
+		asset.PurchaseDate = &t
+	}
+
+	// Book value = purchase price initially
+	bv := req.PurchasePrice
+	asset.BookValue = &bv
+
+	if err := h.GormDB.Create(&asset).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, asset)
+}
+
 type AssetImportHandler struct {
 	GormDB *gorm.DB
 }

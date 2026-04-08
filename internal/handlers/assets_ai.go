@@ -333,32 +333,68 @@ func monthsBetween(from, to time.Time) float64 {
 
 // ── PATCH /xero/assets/:id ─────────────────────────────────────
 
+type assetPatchRequest struct {
+	AssetName                  *string  `json:"asset_name"`
+	PurchaseDate               *string  `json:"purchase_date"`
+	PurchasePrice              *float64 `json:"purchase_price"`
+	Location                   *string  `json:"location"`
+	AssetTypeName              *string  `json:"asset_type"`
+	Description                *string  `json:"description"`
+	Status                     *string  `json:"status"`
+	ResidualValue              *float64 `json:"residual_value"`
+	UsefulLifeYearsOverride    *int     `json:"useful_life_years_override"`
+	DepreciationMethodOverride *string  `json:"depreciation_method_override"`
+	AssetCategory              *string  `json:"asset_category"`
+	DepreciationRateOverride   *float64 `json:"depreciation_rate_override"`
+}
+
 func (h *AssetAIHandler) PatchAsset(c *gin.Context) {
 	id := c.Param("id")
 
-	var req struct {
-		UsefulLifeOverride *int     `json:"useful_life_years_override"`
-		DepMethodOverride  *string  `json:"depreciation_method_override"`
-		AssetCategory      *string  `json:"asset_category"`
-		DepRateOverride    *float64 `json:"depreciation_rate_override"`
-	}
+	var req assetPatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "invalid request body"})
 		return
 	}
 
 	updates := map[string]interface{}{}
-	if req.UsefulLifeOverride != nil {
-		updates["useful_life_years_override"] = *req.UsefulLifeOverride
+	if req.AssetName != nil {
+		updates["asset_name"] = *req.AssetName
 	}
-	if req.DepMethodOverride != nil {
-		updates["depreciation_method_override"] = *req.DepMethodOverride
+	if req.PurchasePrice != nil {
+		updates["purchase_price"] = req.PurchasePrice
+	}
+	if req.Location != nil {
+		updates["location"] = req.Location
+	}
+	if req.Description != nil {
+		updates["description"] = req.Description
+	}
+	if req.Status != nil {
+		updates["status"] = req.Status
+	}
+	if req.AssetTypeName != nil {
+		updates["asset_type_name"] = req.AssetTypeName
+	}
+	if req.ResidualValue != nil {
+		updates["residual_value"] = req.ResidualValue
+	}
+	if req.UsefulLifeYearsOverride != nil {
+		updates["useful_life_years_override"] = *req.UsefulLifeYearsOverride
+	}
+	if req.DepreciationMethodOverride != nil {
+		updates["depreciation_method_override"] = *req.DepreciationMethodOverride
 	}
 	if req.AssetCategory != nil {
 		updates["asset_category"] = *req.AssetCategory
 	}
-	if req.DepRateOverride != nil {
-		updates["depreciation_rate_override"] = *req.DepRateOverride
+	if req.DepreciationRateOverride != nil {
+		updates["depreciation_rate_override"] = *req.DepreciationRateOverride
+	}
+	if req.PurchaseDate != nil {
+		if t, err := time.Parse("2006-01-02", *req.PurchaseDate); err == nil {
+			updates["purchase_date"] = &t
+		}
 	}
 
 	if len(updates) == 0 {
