@@ -196,6 +196,28 @@ func (h *XeroAPIHandler) ListAssetTypes(c *gin.Context) {
 	c.JSON(http.StatusOK, results)
 }
 
+// GET /xero/accounts
+func (h *XeroAPIHandler) ListAccounts(c *gin.Context) {
+	query := h.GormDB.Model(&models.XeroAccount{})
+
+	if v := c.Query("type"); v != "" {
+		query = query.Where("type = ?", v)
+	}
+	if v := c.Query("class"); v != "" {
+		query = query.Where("class = ?", v)
+	}
+	if v := c.Query("status"); v != "" {
+		query = query.Where("status = ?", v)
+	}
+	if v := c.Query("search"); v != "" {
+		query = query.Where("name ILIKE ? OR code ILIKE ? OR description ILIKE ?", "%"+v+"%", "%"+v+"%", "%"+v+"%")
+	}
+
+	var results []models.XeroAccount
+	query.Order("code ASC").Find(&results)
+	c.JSON(http.StatusOK, results)
+}
+
 // GET /xero/journals
 func (h *XeroAPIHandler) ListJournals(c *gin.Context) {
 	page, pageSize, offset := xeroPaginate(c)

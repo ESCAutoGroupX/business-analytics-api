@@ -678,6 +678,26 @@ type XeroAssetType struct {
 
 func (XeroAssetType) TableName() string { return "xero_asset_types" }
 
+type XeroAccount struct {
+	ID                 int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	XeroID             string    `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`
+	TenantID           string    `gorm:"column:tenant_id" json:"tenant_id"`
+	Code               string    `gorm:"column:code;index" json:"code"`
+	Name               string    `gorm:"column:name" json:"name"`
+	Type               string    `gorm:"column:type" json:"type"`
+	Class              string    `gorm:"column:class" json:"class"`
+	Status             string    `gorm:"column:status" json:"status"`
+	Description        string    `gorm:"column:description" json:"description"`
+	EnablePayments     bool      `gorm:"column:enable_payments" json:"enable_payments"`
+	ShowInExpenseClaims bool     `gorm:"column:show_in_expense_claims" json:"show_in_expense_claims"`
+	BankAccountNumber  string    `gorm:"column:bank_account_number" json:"bank_account_number"`
+	CurrencyCode       string    `gorm:"column:currency_code" json:"currency_code"`
+	TaxType            string    `gorm:"column:tax_type" json:"tax_type"`
+	SyncedAt           time.Time `gorm:"column:synced_at;autoCreateTime" json:"synced_at"`
+}
+
+func (XeroAccount) TableName() string { return "xero_accounts" }
+
 type XeroJournal struct {
 	ID             int        `gorm:"primaryKey;autoIncrement" json:"id"`
 	XeroID         string     `gorm:"column:xero_id;uniqueIndex;not null" json:"xero_id"`

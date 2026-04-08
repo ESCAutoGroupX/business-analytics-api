@@ -706,6 +706,57 @@ func (h *XeroSyncHandler) SyncTrackingCategories(conn *models.XeroConnection) er
 	return nil
 }
 
+// ── Sync: Accounts (Chart of Accounts) ─────────────────────────
+
+func (h *XeroSyncHandler) SyncAccounts(conn *models.XeroConnection) error {
+	result, err := h.xeroAPIGet(conn.AccessToken, conn.TenantID, "Accounts")
+	if err != nil {
+		h.logSync(conn.TenantID, "accounts", "error", 0, err.Error())
+		return err
+	}
+
+	accounts, ok := result["Accounts"].([]interface{})
+	if !ok {
+		h.logSync(conn.TenantID, "accounts", "success", 0, "")
+		return nil
+	}
+
+	totalSynced := 0
+	for _, a := range accounts {
+		am, ok := a.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		record := models.XeroAccount{
+			XeroID:              xeroStr(am, "AccountID"),
+			TenantID:            conn.TenantID,
+			Code:                xeroStr(am, "Code"),
+			Name:                xeroStr(am, "Name"),
+			Type:                xeroStr(am, "Type"),
+			Class:               xeroStr(am, "Class"),
+			Status:              xeroStr(am, "Status"),
+			Description:         xeroStr(am, "Description"),
+			EnablePayments:      xeroBool(am, "EnablePaymentsToAccount"),
+			ShowInExpenseClaims: xeroBool(am, "ShowInExpenseClaims"),
+			BankAccountNumber:   xeroStr(am, "BankAccountNumber"),
+			CurrencyCode:        xeroStr(am, "CurrencyCode"),
+			TaxType:             xeroStr(am, "TaxType"),
+		}
+
+		h.GormDB.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "xero_id"}},
+			UpdateAll: true,
+		}).Create(&record)
+		totalSynced++
+	}
+
+	h.updateSyncState("accounts", totalSynced)
+	h.logSync(conn.TenantID, "accounts", "success", totalSynced, "")
+	log.Printf("SyncAccounts: synced %d accounts", totalSynced)
+	return nil
+}
+
 // ── Sync: Assets ────────────────────────────────────────────────
 
 func (h *XeroSyncHandler) SyncAssets(conn *models.XeroConnection) error {
@@ -886,6 +937,7 @@ func (h *XeroSyncHandler) SyncAll(conn *models.XeroConnection, fullResync bool) 
 		{"payments", h.SyncPayments},
 		{"journals", h.SyncManualJournals},
 		{"tracking-categories", h.SyncTrackingCategories},
+		{"accounts", h.SyncAccounts},
 		{"assets", h.SyncAssets},
 		{"asset-types", h.SyncAssetTypes},
 	}
@@ -971,6 +1023,7 @@ func (h *XeroSyncHandler) TriggerSyncEndpoint(c *gin.Context) {
 		"payments":            h.SyncPayments,
 		"journals":            h.SyncManualJournals,
 		"tracking-categories": h.SyncTrackingCategories,
+		"accounts":            h.SyncAccounts,
 		"assets":              h.SyncAssets,
 		"asset-types":         h.SyncAssetTypes,
 	}

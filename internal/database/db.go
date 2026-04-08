@@ -68,6 +68,7 @@ func ConnectGORM(databaseURL string) (*gorm.DB, error) {
 		&models.XeroPayment{},
 		&models.XeroAsset{},
 		&models.XeroAssetType{},
+		&models.XeroAccount{},
 		&models.XeroJournal{},
 		&models.XeroTrackingCategory{},
 		&models.XeroSyncLog{},

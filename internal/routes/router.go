@@ -182,6 +182,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		protected.POST("/xero/assets/calculate-depreciation", assetAIHandler.CalculateDepreciation)
 		protected.PATCH("/xero/assets/:id", assetAIHandler.PatchAsset)
 		protected.GET("/xero/asset-types", xeroAPIHandler.ListAssetTypes)
+		protected.GET("/xero/accounts", xeroAPIHandler.ListAccounts)
 		protected.GET("/xero/journals", xeroAPIHandler.ListJournals)
 		protected.GET("/xero/tracking-categories", xeroAPIHandler.ListTrackingCategories)
 		protected.GET("/xero/reports/:type", xeroAPIHandler.GetReport)

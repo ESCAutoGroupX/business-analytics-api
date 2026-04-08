@@ -29,9 +29,10 @@ func Start(gormDB *gorm.DB, cfg *config.Config) *cron.Cron {
 	c.AddFunc("*/30 * * * *", wrapJob(h, "payments", h.SyncPayments))
 	c.AddFunc("*/30 * * * *", wrapJob(h, "contacts", h.SyncContacts))
 
-	// Every 60 minutes: journals, tracking categories (incremental)
+	// Every 60 minutes: journals, tracking categories, accounts (incremental)
 	c.AddFunc("0 * * * *", wrapJob(h, "journals", h.SyncManualJournals))
 	c.AddFunc("0 * * * *", wrapJob(h, "tracking-categories", h.SyncTrackingCategories))
+	c.AddFunc("0 * * * *", wrapJob(h, "accounts", h.SyncAccounts))
 
 	// Daily at 2am: full resync — clears sync state and re-fetches everything
 	c.AddFunc("0 2 * * *", wrapSyncAll(h))
