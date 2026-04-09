@@ -309,11 +309,12 @@ func (h *PlaidHandler) CreateLinkToken(c *gin.Context) {
 	}
 
 	result, err := h.plaidRequest("/link/token/create", map[string]interface{}{
-		"user":          map[string]string{"client_user_id": req.UserID},
-		"products":      []string{"transactions"},
-		"country_codes": []string{"US"},
-		"language":      "en",
-		"client_name":   "Business Analytics",
+		"user":                          map[string]string{"client_user_id": req.UserID},
+		"products":                      []string{"transactions", "auth"},
+		"additional_consented_products": []string{"investments", "liabilities"},
+		"country_codes":                 []string{"US"},
+		"language":                      "en",
+		"client_name":                   "Business Analytics",
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
