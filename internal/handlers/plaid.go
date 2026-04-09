@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,10 +10,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
@@ -657,6 +660,150 @@ func (h *PlaidHandler) SandboxConnectBank(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "Sandbox bank account linked",
 		"access_token": accessToken,
+	})
+}
+
+// POST /plaid/import-csv — import bank CSV (b1Bank format)
+func (h *PlaidHandler) ImportCSV(c *gin.Context) {
+	file, _, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	headers, err := reader.Read()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "failed to read CSV headers"})
+		return
+	}
+
+	colIdx := map[string]int{}
+	for i, h := range headers {
+		colIdx[strings.TrimSpace(h)] = i
+	}
+
+	var rows [][]string
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			continue
+		}
+		rows = append(rows, row)
+	}
+
+	imported := 0
+	var importErrors []string
+	accountID := "b1bank-3920"
+	accountOwner := "MAX COMMERCIAL MM 3920"
+	accountName := "MAX COMMERCIAL MM"
+	accountType := "depository"
+	source := "csv_import"
+
+	for i, row := range rows {
+		rowNum := i + 2
+
+		postDateStr := csvGet(row, colIdx, "Post Date")
+		description := csvGet(row, colIdx, "Description")
+		debitStr := csvGet(row, colIdx, "Debit")
+		creditStr := csvGet(row, colIdx, "Credit")
+		statusStr := csvGet(row, colIdx, "Status")
+		balanceStr := csvGet(row, colIdx, "Balance")
+		acctNum := csvGet(row, colIdx, "Account Number")
+		checkNum := csvGet(row, colIdx, "Check")
+
+		if postDateStr == "" {
+			importErrors = append(importErrors, fmt.Sprintf("row %d: missing Post Date", rowNum))
+			continue
+		}
+
+		// Parse date in M/D/YYYY format
+		parsedDate, err := time.Parse("1/2/2006", postDateStr)
+		if err != nil {
+			importErrors = append(importErrors, fmt.Sprintf("row %d: invalid date %q", rowNum, postDateStr))
+			continue
+		}
+		dateStr := parsedDate.Format("2006-01-02")
+
+		// Amount: Debit positive (money out), Credit negative (money in) — Plaid convention
+		var amount *float64
+		if debitStr != "" {
+			amount = csvParseFloat(debitStr)
+		} else if creditStr != "" {
+			if v := csvParseFloat(creditStr); v != nil {
+				neg := -(*v)
+				amount = &neg
+			}
+		}
+
+		pending := false
+		if strings.EqualFold(statusStr, "Posted") {
+			pending = false
+		}
+
+		currentBalance := csvParseFloat(balanceStr)
+
+		plaidID := fmt.Sprintf("b1bank-%s-%d", acctNum, i)
+
+		tx := models.Transaction{
+			ID:             uuid.New().String(),
+			PlaidID:        &plaidID,
+			AccountID:      &accountID,
+			Date:           &dateStr,
+			Amount:         amount,
+			Name:           csvNilIfEmpty(description),
+			MerchantName:   csvNilIfEmpty(description),
+			Pending:        &pending,
+			CurrentBalance: currentBalance,
+			AccountOwner:   &accountOwner,
+			AccountName:    &accountName,
+			AccountType:    &accountType,
+			Source:         &source,
+			CheckNumber:    csvNilIfEmpty(checkNum),
+		}
+
+		if err := h.GormDB.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "plaid_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"account_id", "date", "amount", "name", "merchant_name",
+				"pending", "current_balance", "account_owner", "account_name",
+				"account_type", "source", "check_number", "updated_at",
+			}),
+		}).Create(&tx).Error; err != nil {
+			importErrors = append(importErrors, fmt.Sprintf("row %d: %v", rowNum, err))
+			continue
+		}
+
+		// Insert daily balance snapshot if balance is present
+		if currentBalance != nil {
+			snap := models.DailyBalanceSnapshot{
+				AccountID:      accountID,
+				AccountName:    accountName,
+				AccountType:    accountType,
+				CurrentBalance: currentBalance,
+				SnapshotDate:   dateStr,
+				Source:         source,
+			}
+			h.GormDB.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "account_id"}, {Name: "snapshot_date"}},
+				DoUpdates: clause.AssignmentColumns([]string{
+					"current_balance", "source",
+				}),
+			}).Create(&snap)
+		}
+
+		imported++
+	}
+
+	log.Printf("CSV import: imported %d rows, %d errors", imported, len(importErrors))
+
+	c.JSON(http.StatusOK, gin.H{
+		"imported": imported,
+		"errors":   importErrors,
 	})
 }
 
