@@ -2098,3 +2098,107 @@ func (h *DashboardHandler) GetRevenueExpenses(c *gin.Context) {
 		"monthly":             monthly,
 	})
 }
+
+// GET /dashboard/revenue-detail
+// Returns paginated xero_bank_transactions filtered by type and period.
+func (h *DashboardHandler) GetRevenueDetail(c *gin.Context) {
+	ctx := context.Background()
+	now := time.Now()
+
+	// --- query params ---
+	txnType := c.DefaultQuery("type", "RECEIVE")
+	if txnType != "RECEIVE" && txnType != "SPEND" {
+		txnType = "RECEIVE"
+	}
+
+	period := c.DefaultQuery("period", "mtd")
+	if period != "mtd" && period != "ytd" {
+		period = "mtd"
+	}
+
+	page := parseIntDefault(c.Query("page"), 1)
+	perPage := parseIntDefault(c.Query("per_page"), 50)
+	search := strings.TrimSpace(c.Query("search"))
+
+	// --- date range ---
+	var dateFrom string
+	if period == "ytd" {
+		dateFrom = time.Date(now.Year(), 1, 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	} else {
+		dateFrom = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	}
+
+	// --- build WHERE clause ---
+	where := "type = $1 AND date >= $2"
+	args := []interface{}{txnType, dateFrom}
+
+	if search != "" {
+		pattern := "%" + search + "%"
+		where += " AND (contact_name ILIKE $3 OR reference ILIKE $4)"
+		args = append(args, pattern, pattern)
+	}
+
+	// --- count + sum ---
+	var total int
+	var sum float64
+	countSQL := fmt.Sprintf(
+		"SELECT COUNT(*), COALESCE(SUM(total), 0) FROM xero_bank_transactions WHERE %s", where)
+	err := h.sqlDB().QueryRowContext(ctx, countSQL, args...).Scan(&total, &sum)
+	if err != nil {
+		log.Printf("ERROR revenue-detail count: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "query failed"})
+		return
+	}
+
+	// --- paginated data ---
+	offset := (page - 1) * perPage
+	dataSQL := fmt.Sprintf(
+		`SELECT id, date, bank_account_name, contact_name, reference, total, is_reconciled, type
+		 FROM xero_bank_transactions
+		 WHERE %s
+		 ORDER BY date DESC, id DESC
+		 LIMIT %d OFFSET %d`, where, perPage, offset)
+
+	rows, err := h.sqlDB().QueryContext(ctx, dataSQL, args...)
+	if err != nil {
+		log.Printf("ERROR revenue-detail data: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "query failed"})
+		return
+	}
+	defer rows.Close()
+
+	type txnRow struct {
+		ID              int     `json:"id"`
+		Date            string  `json:"date"`
+		BankAccountName string  `json:"bank_account_name"`
+		ContactName     string  `json:"contact_name"`
+		Reference       string  `json:"reference"`
+		Total           float64 `json:"total"`
+		IsReconciled    bool    `json:"is_reconciled"`
+		Type            string  `json:"type"`
+	}
+
+	data := []txnRow{}
+	for rows.Next() {
+		var r txnRow
+		var dt time.Time
+		var ref sql.NullString
+		if err := rows.Scan(&r.ID, &dt, &r.BankAccountName, &r.ContactName, &ref, &r.Total, &r.IsReconciled, &r.Type); err != nil {
+			log.Printf("ERROR revenue-detail scan: %v", err)
+			continue
+		}
+		r.Date = dt.Format("2006-01-02")
+		if ref.Valid {
+			r.Reference = ref.String
+		}
+		data = append(data, r)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":     data,
+		"total":    total,
+		"sum":      round2(sum),
+		"page":     page,
+		"per_page": perPage,
+	})
+}
