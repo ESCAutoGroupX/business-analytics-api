@@ -2018,3 +2018,83 @@ func (h *DashboardHandler) GetAccountsPayableByVendor(c *gin.Context) {
 
 	c.JSON(http.StatusOK, results)
 }
+
+// GET /dashboard/revenue-expenses
+// Returns revenue & expenses from xero_bank_transactions (RECEIVE/SPEND).
+func (h *DashboardHandler) GetRevenueExpenses(c *gin.Context) {
+	ctx := context.Background()
+	now := time.Now()
+
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	yearStart := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	sixMonthsAgo := time.Date(now.Year(), now.Month()-5, 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+
+	// MTD
+	var revenueMTD, expensesMTD float64
+	h.sqlDB().QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(CASE WHEN type='RECEIVE' THEN total ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN type='SPEND'   THEN total ELSE 0 END), 0)
+		 FROM xero_bank_transactions WHERE date >= $1`, monthStart).Scan(&revenueMTD, &expensesMTD)
+
+	// YTD
+	var revenueYTD, expensesYTD float64
+	h.sqlDB().QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(CASE WHEN type='RECEIVE' THEN total ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN type='SPEND'   THEN total ELSE 0 END), 0)
+		 FROM xero_bank_transactions WHERE date >= $1`, yearStart).Scan(&revenueYTD, &expensesYTD)
+
+	// Monthly breakdown (last 6 months) for chart
+	rows, err := h.sqlDB().QueryContext(ctx,
+		`SELECT TO_CHAR(date, 'YYYY-MM') AS m,
+		        COALESCE(SUM(CASE WHEN type='RECEIVE' THEN total ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN type='SPEND'   THEN total ELSE 0 END), 0)
+		 FROM xero_bank_transactions
+		 WHERE date >= $1
+		 GROUP BY m ORDER BY m`, sixMonthsAgo)
+	if err != nil {
+		log.Printf("ERROR revenue-expenses monthly: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "query failed"})
+		return
+	}
+	defer rows.Close()
+
+	dbMonths := map[string][2]float64{}
+	for rows.Next() {
+		var m string
+		var rev, exp float64
+		rows.Scan(&m, &rev, &exp)
+		dbMonths[m] = [2]float64{rev, exp}
+	}
+
+	// Build ordered 6-month array (fill zeros for missing months)
+	monthNames := []string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+	monthly := []gin.H{}
+	prevRevenue := 0.0
+	prevExpenses := 0.0
+	for i := 5; i >= 0; i-- {
+		d := time.Date(now.Year(), now.Month()-time.Month(i), 1, 0, 0, 0, 0, time.UTC)
+		key := d.Format("2006-01")
+		vals := dbMonths[key]
+		entry := gin.H{
+			"month":    monthNames[d.Month()-1],
+			"revenue":  round2(vals[0]),
+			"expenses": round2(vals[1]),
+		}
+		monthly = append(monthly, entry)
+		if i == 1 {
+			prevRevenue = vals[0]
+			prevExpenses = vals[1]
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"revenue_mtd":         round2(revenueMTD),
+		"revenue_ytd":         round2(revenueYTD),
+		"expenses_mtd":        round2(expensesMTD),
+		"expenses_ytd":        round2(expensesYTD),
+		"revenue_prev_month":  round2(prevRevenue),
+		"expenses_prev_month": round2(prevExpenses),
+		"month":               now.Format("January 2006"),
+		"monthly":             monthly,
+	})
+}

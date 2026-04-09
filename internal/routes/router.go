@@ -98,6 +98,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			dashboard.GET("/account-receivable/shop/:shop_id", dashboardHandler.GetAccountReceivableByShop)
 			dashboard.GET("/account-receivable/aging_receivables", dashboardHandler.GetAgingReceivables)
 			dashboard.GET("/account-receivable/graph", dashboardHandler.GetAccountReceivableGraph)
+			dashboard.GET("/revenue-expenses", dashboardHandler.GetRevenueExpenses)
 		}
 
 		// Vendors
