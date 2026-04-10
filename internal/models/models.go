@@ -824,6 +824,9 @@ type Document struct {
 	OCRAgentVersion      *string   `gorm:"column:ocr_agent_version" json:"ocr_agent_version"`
 	Status               string    `gorm:"column:status;default:pending" json:"status"`
 	UploadedBy           *string   `gorm:"column:uploaded_by" json:"uploaded_by"`
+	ParentDocumentID     *int       `gorm:"column:parent_document_id" json:"parent_document_id"`
+	PageCount            *int       `gorm:"column:page_count" json:"page_count"`
+	PageNumbers          *string    `gorm:"column:page_numbers" json:"page_numbers"`
 	IsDeleted            bool       `gorm:"column:is_deleted;default:false" json:"-"`
 	WickedFileSent       bool       `gorm:"column:wickedfile_sent;default:false" json:"wickedfile_sent"`
 	WickedFileSentAt     *time.Time `gorm:"column:wickedfile_sent_at" json:"wickedfile_sent_at"`

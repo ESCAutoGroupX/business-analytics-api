@@ -102,11 +102,27 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		return
 	}
 
-	// Run multi-agent pipeline (falls back to single-agent on failure)
+	// ── Step 0: Multi-invoice PDF detection ──────────────────
+	groups, tmpDir, splitErr := h.detectMultiInvoicePDF(apiKey, savePath, ext)
+	if tmpDir != "" {
+		defer os.RemoveAll(tmpDir)
+	}
+
+	if splitErr != nil {
+		log.Printf("documents: split detection error (proceeding as single): %v", splitErr)
+	}
+
+	if len(groups) > 1 {
+		// Multi-invoice PDF — create parent + child documents
+		docs := h.processMultiInvoicePDF(apiKey, file.Filename, savePath, safeFilename, ext, groups, fileBytes)
+		c.JSON(http.StatusOK, gin.H{"documents": docs, "split": true, "invoice_count": len(groups)})
+		return
+	}
+
+	// ── Single document processing (original flow) ───────────
 	ocrResult, ocrRaw, confidence, agentVersion, err := h.runPipeline(apiKey, base64Data, ext)
 	if err != nil {
 		log.Printf("documents: pipeline error: %v", err)
-		// Save document even if OCR fails
 		doc := models.Document{
 			Filename: file.Filename,
 			FilePath: savePath,
@@ -118,93 +134,17 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		return
 	}
 
-	// Match location from addresses
-	locationCode := matchLocation(ocrResult.ShipToAddress, ocrResult.BillToAddress)
+	doc := h.buildDocumentFromPipeline(file.Filename, savePath, safeFilename, ocrResult, ocrRaw, confidence, agentVersion, nil, nil)
 
-	// Determine status based on confidence
-	status := "pending"
-	if confidence > 0.85 {
-		status = "auto_matched"
-	} else if confidence < 0.60 {
-		status = "needs_review"
-	}
-
-	// Build document record
-	doc := models.Document{
-		Filename:            file.Filename,
-		FilePath:            savePath,
-		FileURL:             "/documents/file/" + safeFilename,
-		DocumentType:        docStrPtr(ocrResult.DocumentType),
-		VendorName:          docStrPtr(ocrResult.VendorName),
-		VendorAddress:       docStrPtr(ocrResult.VendorAddress),
-		DocumentDate:        docStrPtr(ocrResult.DocumentDate),
-		DocumentNumber:      docStrPtr(ocrResult.DocumentNumber),
-		VendorPONumber:      docStrPtr(ocrResult.VendorPONumber),
-		VendorInvoiceNumber: docStrPtr(ocrResult.VendorInvoiceNumber),
-		OrderNumber:         docStrPtr(ocrResult.OrderNumber),
-		Status:              status,
-		OCRRaw:              docStrPtr(ocrRaw),
-		OCRConfidence:       &confidence,
-		OCRAgentVersion:     docStrPtr(agentVersion),
-	}
-
-	if ocrResult.TotalAmount != 0 {
-		doc.TotalAmount = &ocrResult.TotalAmount
-	}
-	if ocrResult.TaxAmount != 0 {
-		doc.TaxAmount = &ocrResult.TaxAmount
-	}
-
-	// Serialize line items as JSON
-	if ocrResult.LineItems != nil {
-		liJSON, _ := json.Marshal(ocrResult.LineItems)
-		liStr := string(liJSON)
-		doc.LineItems = &liStr
-	}
-
-	if locationCode != "" {
-		doc.LocationCode = &locationCode
-		locName := locationCode // Use code as name fallback
-		doc.Location = &locName
-	}
-
-	// Check if agent4 found a transaction match
-	var agent4MatchID string
-	for _, ref := range ocrResult.POReferences {
-		if strings.HasPrefix(ref, "agent4_match:") {
-			agent4MatchID = strings.TrimPrefix(ref, "agent4_match:")
-			break
-		}
-	}
-
-	if agent4MatchID != "" {
-		doc.MatchedTransactionID = &agent4MatchID
-		if status != "auto_matched" {
-			doc.Status = "matched"
-		}
-	}
-
-	// Create document
 	if err := h.GormDB.Create(&doc).Error; err != nil {
 		log.Printf("documents: failed to save document: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to save document"})
 		return
 	}
 
-	// If pipeline didn't match, try legacy auto-match as fallback
-	if agent4MatchID == "" {
-		matchedTxnID := h.autoMatchTransaction(ocrResult.TotalAmount, ocrResult.DocumentDate, ocrResult.VendorName)
-		if matchedTxnID != "" {
-			doc.MatchedTransactionID = &matchedTxnID
-			doc.Status = "matched"
-			h.GormDB.Model(&doc).Updates(map[string]interface{}{
-				"matched_transaction_id": matchedTxnID,
-				"status":                 "matched",
-			})
-		}
-	}
+	// Legacy auto-match fallback
+	h.tryAutoMatch(&doc, ocrResult)
 
-	// Forward to WickedFile (async — don't block the response)
 	go h.forwardToWickedFile(&doc, fileBytes)
 
 	c.JSON(http.StatusOK, gin.H{"document": doc})
@@ -764,6 +704,183 @@ func (h *DocumentHandler) Summary(c *gin.Context) {
 		"unmatched":  unmatched,
 		"this_month": thisMonth,
 	})
+}
+
+// ── Document builder helpers ─────────────────────────────────
+
+func (h *DocumentHandler) buildDocumentFromPipeline(
+	filename, filePath, safeFilename string,
+	ocr *ocrExtractedData, ocrRaw string,
+	confidence float64, agentVersion string,
+	parentID *int, pageInfo *string,
+) models.Document {
+	locationCode := matchLocation(ocr.ShipToAddress, ocr.BillToAddress)
+
+	status := "pending"
+	if confidence > 0.85 {
+		status = "auto_matched"
+	} else if confidence < 0.60 {
+		status = "needs_review"
+	}
+
+	doc := models.Document{
+		Filename:            filename,
+		FilePath:            filePath,
+		FileURL:             "/documents/file/" + safeFilename,
+		DocumentType:        docStrPtr(ocr.DocumentType),
+		VendorName:          docStrPtr(ocr.VendorName),
+		VendorAddress:       docStrPtr(ocr.VendorAddress),
+		DocumentDate:        docStrPtr(ocr.DocumentDate),
+		DocumentNumber:      docStrPtr(ocr.DocumentNumber),
+		VendorPONumber:      docStrPtr(ocr.VendorPONumber),
+		VendorInvoiceNumber: docStrPtr(ocr.VendorInvoiceNumber),
+		OrderNumber:         docStrPtr(ocr.OrderNumber),
+		Status:              status,
+		OCRRaw:              docStrPtr(ocrRaw),
+		OCRConfidence:       &confidence,
+		OCRAgentVersion:     docStrPtr(agentVersion),
+		ParentDocumentID:    parentID,
+		PageNumbers:         pageInfo,
+	}
+
+	if ocr.TotalAmount != 0 {
+		doc.TotalAmount = &ocr.TotalAmount
+	}
+	if ocr.TaxAmount != 0 {
+		doc.TaxAmount = &ocr.TaxAmount
+	}
+	if ocr.LineItems != nil {
+		liJSON, _ := json.Marshal(ocr.LineItems)
+		liStr := string(liJSON)
+		doc.LineItems = &liStr
+	}
+	if locationCode != "" {
+		doc.LocationCode = &locationCode
+		doc.Location = &locationCode
+	}
+
+	// Check agent4 match
+	for _, ref := range ocr.POReferences {
+		if strings.HasPrefix(ref, "agent4_match:") {
+			matchID := strings.TrimPrefix(ref, "agent4_match:")
+			doc.MatchedTransactionID = &matchID
+			if status != "auto_matched" {
+				doc.Status = "matched"
+			}
+			break
+		}
+	}
+
+	return doc
+}
+
+func (h *DocumentHandler) tryAutoMatch(doc *models.Document, ocr *ocrExtractedData) {
+	// Skip if already matched by agent4
+	if doc.MatchedTransactionID != nil {
+		return
+	}
+	matchedTxnID := h.autoMatchTransaction(ocr.TotalAmount, ocr.DocumentDate, ocr.VendorName)
+	if matchedTxnID != "" {
+		doc.MatchedTransactionID = &matchedTxnID
+		doc.Status = "matched"
+		h.GormDB.Model(doc).Updates(map[string]interface{}{
+			"matched_transaction_id": matchedTxnID,
+			"status":                 "matched",
+		})
+	}
+}
+
+func (h *DocumentHandler) processMultiInvoicePDF(
+	apiKey, origFilename, origPath, origSafeFilename, ext string,
+	groups []invoiceGroup, origFileBytes []byte,
+) []models.Document {
+	// Create parent document record
+	pageCount := 0
+	for _, g := range groups {
+		pageCount += len(g.Pages)
+	}
+	pc := pageCount
+	parentDoc := models.Document{
+		Filename:  origFilename,
+		FilePath:  origPath,
+		FileURL:   "/documents/file/" + origSafeFilename,
+		Status:    "split",
+		PageCount: &pc,
+	}
+	h.GormDB.Create(&parentDoc)
+	log.Printf("splitter: created parent doc %d with %d pages, %d invoices", parentDoc.ID, pageCount, len(groups))
+
+	var childDocs []models.Document
+
+	for _, group := range groups {
+		// Build page numbers string
+		pageStrs := make([]string, len(group.Pages))
+		for i, p := range group.Pages {
+			pageStrs[i] = strconv.Itoa(p)
+		}
+		pageNumStr := strings.Join(pageStrs, ",")
+		groupPageCount := len(group.Pages)
+
+		// Extract pages into a child PDF
+		childFilename := fmt.Sprintf("%s_inv_%s.pdf",
+			strings.TrimSuffix(origFilename, filepath.Ext(origFilename)),
+			group.InvoiceNumber)
+		childSafe := fmt.Sprintf("%d_%s", time.Now().UnixMilli(), childFilename)
+		childPath := filepath.Join("static/documents", childSafe)
+
+		if err := extractPDFPageRange(origPath, childPath, group.Pages); err != nil {
+			log.Printf("splitter: failed to extract pages %v for invoice %s: %v", group.Pages, group.InvoiceNumber, err)
+			continue
+		}
+
+		// Read child PDF for pipeline
+		childBytes, err := os.ReadFile(childPath)
+		if err != nil {
+			log.Printf("splitter: failed to read child PDF: %v", err)
+			continue
+		}
+		childB64 := base64.StdEncoding.EncodeToString(childBytes)
+
+		// Run full pipeline on the child PDF
+		ocrResult, ocrRaw, confidence, agentVersion, err := h.runPipeline(apiKey, childB64, ext)
+		if err != nil {
+			log.Printf("splitter: pipeline failed for invoice %s: %v", group.InvoiceNumber, err)
+			// Still create a record with minimal info
+			pID := parentDoc.ID
+			childDoc := models.Document{
+				Filename:         childFilename,
+				FilePath:         childPath,
+				FileURL:          "/documents/file/" + childSafe,
+				Status:           "ocr_failed",
+				ParentDocumentID: &pID,
+				PageCount:        &groupPageCount,
+				PageNumbers:      &pageNumStr,
+			}
+			h.GormDB.Create(&childDoc)
+			childDocs = append(childDocs, childDoc)
+			continue
+		}
+
+		pID := parentDoc.ID
+		childDoc := h.buildDocumentFromPipeline(childFilename, childPath, childSafe,
+			ocrResult, ocrRaw, confidence, agentVersion, &pID, &pageNumStr)
+		childDoc.PageCount = &groupPageCount
+
+		if err := h.GormDB.Create(&childDoc).Error; err != nil {
+			log.Printf("splitter: failed to save child doc: %v", err)
+			continue
+		}
+
+		h.tryAutoMatch(&childDoc, ocrResult)
+
+		go h.forwardToWickedFile(&childDoc, childBytes)
+
+		childDocs = append(childDocs, childDoc)
+		log.Printf("splitter: created child doc %d for invoice %s (pages %s, confidence=%.2f)",
+			childDoc.ID, group.InvoiceNumber, pageNumStr, confidence)
+	}
+
+	return childDocs
 }
 
 // ── Rescan All Documents ──────────────────────────────────────
