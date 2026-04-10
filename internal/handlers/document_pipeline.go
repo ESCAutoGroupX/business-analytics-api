@@ -314,7 +314,8 @@ IMPORTANT: For each line item, extract the part_number (product/SKU number) — 
   "line_items": [{"part_number":"","description":"","qty_ordered":0,"qty_shipped":0,"net_price":0,"extended_net_price":0}],
   "ship_to_address": "",
   "bill_to_address": ""
-}`
+}
+IMPORTANT: For each line item, extract the part_number (product/SKU number) — this is critical for matching to repair orders.`
 
 	case "CARQUEST":
 		return `This is a CarQuest automotive parts invoice.
@@ -343,7 +344,8 @@ Extract as JSON:
   "sales_person": ""
 }
 IMPORTANT: vendor_po_number (PO No.) and vendor_invoice_number (Invoice No.) are DIFFERENT fields. Do not confuse them.
-IMPORTANT: vendor_name MUST be "CARQUEST" — do NOT use the dealer/customer name (e.g. RSR AUTO PARTS).`
+IMPORTANT: vendor_name MUST be "CARQUEST" — do NOT use the dealer/customer name (e.g. RSR AUTO PARTS).
+IMPORTANT: For each line item, extract the part_number (product/SKU number) — this is critical for matching to repair orders.`
 
 	case "OREILLY":
 		return `This is an O'Reilly Auto Parts invoice. Extract as JSON:
@@ -362,7 +364,8 @@ IMPORTANT: vendor_name MUST be "CARQUEST" — do NOT use the dealer/customer nam
   "line_items": [{"part_number":"","description":"","qty_ordered":0,"qty_shipped":0,"net_price":0,"extended_net_price":0}],
   "ship_to_address": "",
   "bill_to_address": ""
-}`
+}
+IMPORTANT: For each line item, extract the part_number (product/SKU number) — this is critical for matching to repair orders.`
 
 	default:
 		return `Extract all fields from this automotive invoice as JSON:
