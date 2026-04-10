@@ -28,6 +28,8 @@ type Config struct {
 	SMTPPass               string
 	SMTPFrom               string
 	AnthropicAPIKey        string
+	DocumentsS3Bucket      string
+	AWSRegion              string
 }
 
 func Load() *Config {
@@ -61,5 +63,7 @@ func Load() *Config {
 		SMTPPass:               os.Getenv("SMTP_PASS"),
 		SMTPFrom:               os.Getenv("SMTP_FROM"),
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),
+		DocumentsS3Bucket:      os.Getenv("DOCUMENTS_S3_BUCKET"),
+		AWSRegion:              os.Getenv("AWS_REGION"),
 	}
 }

@@ -39,6 +39,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	paybillHandler := &handlers.PayBillHandler{GormDB: gormDB}
 	tekmetricHandler := &handlers.TekmetricHandler{GormDB: gormDB, Cfg: cfg}
 	dashboardHandler := &handlers.DashboardHandler{GormDB: gormDB, Cfg: cfg}
+	documentHandler := &handlers.DocumentHandler{GormDB: gormDB, Cfg: cfg}
 	notificationHandler := &handlers.NotificationHandler{
 		Email: &notifications.EmailSender{GormDB: gormDB, Cfg: cfg},
 	}
@@ -317,6 +318,19 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			tekmetric.GET("/custo", tekmetricHandler.GetAllCustomersParallel)
 			tekmetric.GET("/jobs", tekmetricHandler.GetJobs)
 			tekmetric.GET("/jobs/:job_id", tekmetricHandler.GetJobByID)
+		}
+
+		// Documents
+		docs := protected.Group("/documents")
+		{
+			docs.POST("/upload", documentHandler.Upload)
+			docs.GET("/", documentHandler.List)
+			docs.GET("/summary", documentHandler.Summary)
+			docs.GET("/:id", documentHandler.Get)
+			docs.PATCH("/:id", documentHandler.Update)
+			docs.DELETE("/:id", documentHandler.Delete)
+			docs.POST("/:id/match", documentHandler.Match)
+			docs.GET("/:id/file", documentHandler.ServeFile)
 		}
 
 		// Locations

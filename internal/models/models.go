@@ -793,3 +793,36 @@ type DailyBalanceSnapshot struct {
 }
 
 func (DailyBalanceSnapshot) TableName() string { return "daily_balance_snapshots" }
+
+// ──────────────────────────────────────────────
+// Documents (OCR scanning)
+// ──────────────────────────────────────────────
+
+type Document struct {
+	ID                   int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	Filename             string    `gorm:"column:filename;not null" json:"filename"`
+	FilePath             string    `gorm:"column:file_path;not null" json:"file_path"`
+	FileURL              string    `gorm:"column:file_url" json:"file_url"`
+	DocumentType         *string   `gorm:"column:document_type" json:"document_type"`
+	VendorName           *string   `gorm:"column:vendor_name" json:"vendor_name"`
+	VendorAddress        *string   `gorm:"column:vendor_address" json:"vendor_address"`
+	DocumentDate         *string   `gorm:"column:document_date" json:"document_date"`
+	DocumentNumber       *string   `gorm:"column:document_number" json:"document_number"`
+	TotalAmount          *float64  `gorm:"column:total_amount" json:"total_amount"`
+	TaxAmount            *float64  `gorm:"column:tax_amount" json:"tax_amount"`
+	LineItems            *string   `gorm:"column:line_items;type:jsonb" json:"line_items"`
+	Location             *string   `gorm:"column:location" json:"location"`
+	LocationCode         *string   `gorm:"column:location_code" json:"location_code"`
+	PONumber             *string   `gorm:"column:po_number" json:"po_number"`
+	MatchedTransactionID *string   `gorm:"column:matched_transaction_id" json:"matched_transaction_id"`
+	MatchedXeroInvoiceID *int      `gorm:"column:matched_xero_invoice_id" json:"matched_xero_invoice_id"`
+	OCRRaw               *string   `gorm:"column:ocr_raw" json:"-"`
+	OCRConfidence        *float64  `gorm:"column:ocr_confidence" json:"ocr_confidence"`
+	Status               string    `gorm:"column:status;default:pending" json:"status"`
+	UploadedBy           *string   `gorm:"column:uploaded_by" json:"uploaded_by"`
+	IsDeleted            bool      `gorm:"column:is_deleted;default:false" json:"-"`
+	CreatedAt            time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt            time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+}
+
+func (Document) TableName() string { return "documents" }
