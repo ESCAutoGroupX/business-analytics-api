@@ -328,6 +328,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			docs.GET("/summary", documentHandler.Summary)
 			docs.POST("/rescan-all", documentHandler.RescanAll)
 			docs.GET("/rescan-status", documentHandler.RescanStatus)
+			docs.GET("/vendor-corrections", documentHandler.ListVendorCorrections)
 			docs.GET("/:id", documentHandler.Get)
 			docs.PATCH("/:id", documentHandler.Update)
 			docs.DELETE("/:id", documentHandler.Delete)

@@ -495,17 +495,28 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 	id := c.Param("id")
 
 	var req struct {
-		Status               *string `json:"status"`
-		VendorName           *string `json:"vendor_name"`
-		DocumentType         *string `json:"document_type"`
-		LocationCode         *string `json:"location_code"`
-		VendorPONumber       *string `json:"vendor_po_number"`
-		VendorInvoiceNumber  *string `json:"vendor_invoice_number"`
-		MatchedTransactionID *string `json:"matched_transaction_id"`
-		MatchedXeroInvoiceID *int    `json:"matched_xero_invoice_id"`
+		Status               *string  `json:"status"`
+		VendorName           *string  `json:"vendor_name"`
+		DocumentType         *string  `json:"document_type"`
+		LocationCode         *string  `json:"location_code"`
+		VendorPONumber       *string  `json:"vendor_po_number"`
+		VendorInvoiceNumber  *string  `json:"vendor_invoice_number"`
+		DocumentDate         *string  `json:"document_date"`
+		TotalAmount          *float64 `json:"total_amount"`
+		LineItems            *string  `json:"line_items"`
+		Location             *string  `json:"location"`
+		MatchedTransactionID *string  `json:"matched_transaction_id"`
+		MatchedXeroInvoiceID *int     `json:"matched_xero_invoice_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "invalid request body"})
+		return
+	}
+
+	// Fetch current document for vendor correction detection
+	var currentDoc models.Document
+	if result := h.GormDB.Where("id = ? AND is_deleted = false", id).First(&currentDoc); result.Error != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "document not found"})
 		return
 	}
 
@@ -528,6 +539,18 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 	if req.VendorInvoiceNumber != nil {
 		updates["vendor_invoice_number"] = *req.VendorInvoiceNumber
 	}
+	if req.DocumentDate != nil {
+		updates["document_date"] = *req.DocumentDate
+	}
+	if req.TotalAmount != nil {
+		updates["total_amount"] = *req.TotalAmount
+	}
+	if req.LineItems != nil {
+		updates["line_items"] = *req.LineItems
+	}
+	if req.Location != nil {
+		updates["location"] = *req.Location
+	}
 	if req.MatchedTransactionID != nil {
 		updates["matched_transaction_id"] = *req.MatchedTransactionID
 	}
@@ -538,6 +561,53 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 	if len(updates) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "no fields to update"})
 		return
+	}
+
+	// Detect vendor name correction
+	if req.VendorName != nil {
+		oldName := ""
+		if currentDoc.VendorName != nil {
+			oldName = *currentDoc.VendorName
+		}
+		newName := *req.VendorName
+		if oldName != "" && newName != "" && !strings.EqualFold(oldName, newName) {
+			// Insert/update vendor_corrections
+			db := h.sqlDB()
+			if db != nil {
+				var count int
+				err := db.QueryRow(`
+					INSERT INTO vendor_corrections (detected_name, correct_name, document_format)
+					VALUES ($1, $2, COALESCE((SELECT document_type FROM documents WHERE id = $3), ''))
+					ON CONFLICT (detected_name, correct_name)
+					DO UPDATE SET correction_count = vendor_corrections.correction_count + 1, updated_at = NOW()
+					RETURNING correction_count
+				`, oldName, newName, id).Scan(&count)
+				if err != nil {
+					log.Printf("vendor correction insert error: %v", err)
+				} else {
+					log.Printf("Vendor correction learned: '%s' → '%s' (count: %d)", oldName, newName, count)
+				}
+
+				// Background Claude call to learn the correction
+				apiKey := h.Cfg.AnthropicAPIKey
+				go func(oldN, newN, key string) {
+					prompt := fmt.Sprintf(
+						"A user corrected vendor name from '%s' to '%s'. "+
+							"This is likely because the logo/header of their invoice was partially obscured or misread. "+
+							"Update the classifier knowledge: when you see '%s' in future, the correct vendor is '%s'. "+
+							"Return JSON: {\"alias_confirmed\": true, \"notes\": \"string (any observations about why this happens)\"}",
+						oldN, newN, oldN, newN)
+					resp, err := h.callClaudeText(key,
+						"You are a document classification learning system. A user has corrected a vendor name. Acknowledge and return JSON only.",
+						prompt)
+					if err != nil {
+						log.Printf("vendor correction Claude call failed: %v", err)
+					} else {
+						log.Printf("vendor correction Claude response: %s", resp)
+					}
+				}(oldName, newName, apiKey)
+			}
+		}
 	}
 
 	result := h.GormDB.Model(&models.Document{}).Where("id = ? AND is_deleted = false", id).Updates(updates)
@@ -571,6 +641,55 @@ func (h *DocumentHandler) Delete(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"detail": "document deleted"})
+}
+
+// ── GET /vendor-corrections ─────────────────────────────────
+
+func (h *DocumentHandler) ListVendorCorrections(c *gin.Context) {
+	db := h.sqlDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database unavailable"})
+		return
+	}
+
+	rows, err := db.Query(`
+		SELECT id, detected_name, correct_name, document_format, correction_count, created_at, updated_at
+		FROM vendor_corrections
+		ORDER BY correction_count DESC, updated_at DESC
+	`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "query failed"})
+		return
+	}
+	defer rows.Close()
+
+	type correction struct {
+		ID              int    `json:"id"`
+		DetectedName    string `json:"detected_name"`
+		CorrectName     string `json:"correct_name"`
+		DocumentFormat  string `json:"document_format"`
+		CorrectionCount int    `json:"correction_count"`
+		CreatedAt       string `json:"created_at"`
+		UpdatedAt       string `json:"updated_at"`
+	}
+
+	var results []correction
+	for rows.Next() {
+		var cr correction
+		var docFmt sql.NullString
+		if err := rows.Scan(&cr.ID, &cr.DetectedName, &cr.CorrectName, &docFmt, &cr.CorrectionCount, &cr.CreatedAt, &cr.UpdatedAt); err != nil {
+			continue
+		}
+		if docFmt.Valid {
+			cr.DocumentFormat = docFmt.String
+		}
+		results = append(results, cr)
+	}
+
+	if results == nil {
+		results = []correction{}
+	}
+	c.JSON(http.StatusOK, results)
 }
 
 // ── POST /documents/:id/match ─────────────────────────────────

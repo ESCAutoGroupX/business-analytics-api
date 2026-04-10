@@ -154,6 +154,22 @@ func (h *DocumentHandler) runPipeline(apiKey, base64Data, ext string) (*ocrExtra
 		result.TotalAmount = agent3.CorrectedTotal
 	}
 
+	// Apply learned vendor corrections
+	db := h.sqlDB()
+	if db != nil {
+		var correctName string
+		err := db.QueryRow(`
+			SELECT correct_name FROM vendor_corrections
+			WHERE LOWER(detected_name) = LOWER($1) AND correction_count >= 1
+			ORDER BY correction_count DESC
+			LIMIT 1
+		`, result.VendorName).Scan(&correctName)
+		if err == nil && correctName != "" {
+			log.Printf("Vendor correction applied: '%s' → '%s'", result.VendorName, correctName)
+			result.VendorName = correctName
+		}
+	}
+
 	// Serialize full pipeline output as ocr_raw
 	rawJSON, _ := json.MarshalIndent(output, "", "  ")
 	rawStr := string(rawJSON)
@@ -218,6 +234,21 @@ Common automotive parts vendors:
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
 		return nil, fmt.Errorf("agent1 parse: %w", err)
 	}
+
+	// Check vendor_corrections for learned corrections
+	db := h.sqlDB()
+	if db != nil && result.VendorName != "" {
+		var correctName string
+		err := db.QueryRow(
+			"SELECT correct_name FROM vendor_corrections WHERE LOWER(detected_name) = LOWER($1) AND correction_count >= 1 ORDER BY correction_count DESC LIMIT 1",
+			result.VendorName,
+		).Scan(&correctName)
+		if err == nil && correctName != "" {
+			log.Printf("pipeline: agent1 vendor correction applied: '%s' → '%s'", result.VendorName, correctName)
+			result.VendorName = correctName
+		}
+	}
+
 	return &result, nil
 }
 
