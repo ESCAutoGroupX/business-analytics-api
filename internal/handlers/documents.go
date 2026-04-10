@@ -1190,6 +1190,12 @@ func (h *DocumentHandler) reprocessSingleDocument(apiKey string, doc models.Docu
 
 	h.GormDB.Model(&models.Document{}).Where("id = ?", doc.ID).Updates(updates)
 	log.Printf("reprocess doc %d: confidence=%.2f status=%s", doc.ID, confidence, updates["status"])
+
+	// Statement post-processing on reprocess
+	if ocrResult.DocumentType == "STATEMENT" && ocrRaw != "" {
+		go h.ProcessStatementAfterSave(doc.ID, ocrResult.VendorName, ocrRaw)
+	}
+
 	return gin.H{"document_id": doc.ID, "confidence": confidence, "status": updates["status"]}
 }
 
