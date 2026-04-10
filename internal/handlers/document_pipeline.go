@@ -181,7 +181,19 @@ func (h *DocumentHandler) agent1Classify(apiKey, b64, mediaType, blockType strin
   "confidence": 0.0-1.0
 }
 
-IMPORTANT: Look at the LOGO and HEADER at the TOP of the document — the large company name or logo is the VENDOR (the company SELLING the parts). Do NOT use addresses from the body, ship-to, or bill-to sections.
+CRITICAL: The vendor is identified ONLY by the large logo/brand name printed at the very TOP of the invoice header.
+
+The rule: Who is SENDING/SELLING? That is the vendor.
+Who is RECEIVING/BUYING? That is the customer (ignore this).
+
+Do NOT use addresses, account names, ship-to, or bill-to sections from the body of the document.
+
+For CarQuest invoices:
+- The header shows 'CARQUEST' in large red letters
+- The vendor_name MUST be 'CARQUEST'
+- vendor_format MUST be 'CARQUEST'
+- Any text like 'RSR AUTO PARTS', 'BSR AUTO PARTS' in the body is the DEALER/CUSTOMER name, NOT the vendor
+- CarQuest sends → customer (ESC Auto / RSR Auto) receives. So vendor = CARQUEST, not RSR AUTO PARTS.
 
 Common automotive parts vendors:
 - CarQuest logo → vendor_name: "CARQUEST", document_format: "CARQUEST"
@@ -272,6 +284,35 @@ P.O. No. and Invoice No. are DIFFERENT fields. Do not confuse them.`
   "bill_to_address": ""
 }`
 
+	case "CARQUEST":
+		return `This is a CarQuest automotive parts invoice.
+- The PO No. field contains the repair shop's RO/PO number
+- The Invoice No. field contains CarQuest's invoice number
+- Ship To address is the receiving shop location
+- Extract all line items with part numbers and prices
+
+Extract as JSON:
+{
+  "vendor_name": "CARQUEST",
+  "vendor_address": "",
+  "document_date": "YYYY-MM-DD",
+  "document_number": "from Invoice No. field",
+  "vendor_po_number": "from PO No. field (customer PO/RO number)",
+  "vendor_invoice_number": "from Invoice No. field",
+  "order_number": "",
+  "account_number": "",
+  "total_amount": 0,
+  "tax_amount": 0,
+  "subtotal": 0,
+  "freight": 0,
+  "line_items": [{"part_number":"","description":"","qty_ordered":0,"qty_shipped":0,"unit_price":0,"net_price":0,"extended_net_price":0}],
+  "ship_to_address": "",
+  "bill_to_address": "",
+  "sales_person": ""
+}
+IMPORTANT: vendor_po_number (PO No.) and vendor_invoice_number (Invoice No.) are DIFFERENT fields. Do not confuse them.
+IMPORTANT: vendor_name MUST be "CARQUEST" — do NOT use the dealer/customer name (e.g. RSR AUTO PARTS).`
+
 	case "OREILLY":
 		return `This is an O'Reilly Auto Parts invoice. Extract as JSON:
 {
@@ -318,6 +359,22 @@ IMPORTANT: vendor_po_number (P.O. No.) and vendor_invoice_number (Invoice No.) a
 func (h *DocumentHandler) agent3Validate(apiKey string, data *extractorResult) (*validatorResult, error) {
 	dataJSON, _ := json.Marshal(data)
 
+	// Pre-validation: reject single-word PO numbers that are just prefixes with no digits
+	if data.VendorPONumber != "" {
+		po := strings.TrimSpace(data.VendorPONumber)
+		hasDigit := false
+		for _, c := range po {
+			if c >= '0' && c <= '9' {
+				hasDigit = true
+				break
+			}
+		}
+		if !hasDigit && !strings.Contains(po, " ") {
+			log.Printf("pipeline: agent3 clearing invalid PO number %q (single word, no digits)", po)
+			data.VendorPONumber = ""
+		}
+	}
+
 	prompt := fmt.Sprintf(`Validate this extracted invoice data:
 %s
 
@@ -327,6 +384,7 @@ Check:
 3. Is the PO number format valid? (numeric, 3-8 digits)
 4. Is the date reasonable? (within last 90 days)
 5. Are quantities positive numbers?
+6. If vendor_po_number is a single word with no numbers (e.g. "INV", "PO", "NA", "N/A"), it is NOT a real PO number — flag it as invalid.
 
 Return JSON only:
 {
