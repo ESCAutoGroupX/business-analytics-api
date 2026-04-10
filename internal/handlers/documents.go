@@ -121,16 +121,19 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 
 	// Build document record
 	doc := models.Document{
-		Filename:     file.Filename,
-		FilePath:     savePath,
-		FileURL:      "/documents/file/" + safeFilename,
-		DocumentType: docStrPtr(ocrResult.DocumentType),
-		VendorName:   docStrPtr(ocrResult.VendorName),
-		VendorAddress: docStrPtr(ocrResult.VendorAddress),
-		DocumentDate: docStrPtr(ocrResult.DocumentDate),
-		DocumentNumber: docStrPtr(ocrResult.DocumentNumber),
-		Status:       "pending",
-		OCRRaw:       docStrPtr(ocrRaw),
+		Filename:            file.Filename,
+		FilePath:            savePath,
+		FileURL:             "/documents/file/" + safeFilename,
+		DocumentType:        docStrPtr(ocrResult.DocumentType),
+		VendorName:          docStrPtr(ocrResult.VendorName),
+		VendorAddress:       docStrPtr(ocrResult.VendorAddress),
+		DocumentDate:        docStrPtr(ocrResult.DocumentDate),
+		DocumentNumber:      docStrPtr(ocrResult.DocumentNumber),
+		VendorPONumber:      docStrPtr(ocrResult.VendorPONumber),
+		VendorInvoiceNumber: docStrPtr(ocrResult.VendorInvoiceNumber),
+		OrderNumber:         docStrPtr(ocrResult.OrderNumber),
+		Status:              "pending",
+		OCRRaw:              docStrPtr(ocrRaw),
 	}
 
 	if ocrResult.TotalAmount != 0 {
@@ -160,12 +163,7 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		return
 	}
 
-	// Generate PO number
-	poNumber := generatePONumber(ocrResult, locationCode, doc.ID)
-	if poNumber != "" {
-		doc.PONumber = &poNumber
-		h.GormDB.Model(&doc).Update("po_number", poNumber)
-	}
+	// Internal PO number is NOT generated on upload — only when payment is recorded.
 
 	// Auto-match to transactions
 	matchedTxnID := h.autoMatchTransaction(ocrResult.TotalAmount, ocrResult.DocumentDate, ocrResult.VendorName)
@@ -187,17 +185,20 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 // ── Claude Vision API ─────────────────────────────────────────
 
 type ocrExtractedData struct {
-	DocumentType  string        `json:"document_type"`
-	VendorName    string        `json:"vendor_name"`
-	VendorAddress string        `json:"vendor_address"`
-	DocumentDate  string        `json:"document_date"`
-	DocumentNumber string       `json:"document_number"`
-	TotalAmount   float64       `json:"total_amount"`
-	TaxAmount     float64       `json:"tax_amount"`
-	LineItems     []interface{} `json:"line_items"`
-	ShipToAddress string        `json:"ship_to_address"`
-	BillToAddress string        `json:"bill_to_address"`
-	POReferences  []string      `json:"po_references"`
+	DocumentType        string        `json:"document_type"`
+	VendorName          string        `json:"vendor_name"`
+	VendorAddress       string        `json:"vendor_address"`
+	DocumentDate        string        `json:"document_date"`
+	DocumentNumber      string        `json:"document_number"`
+	TotalAmount         float64       `json:"total_amount"`
+	TaxAmount           float64       `json:"tax_amount"`
+	LineItems           []interface{} `json:"line_items"`
+	ShipToAddress       string        `json:"ship_to_address"`
+	BillToAddress       string        `json:"bill_to_address"`
+	POReferences        []string      `json:"po_references"`
+	VendorPONumber      string        `json:"vendor_po_number"`
+	VendorInvoiceNumber string        `json:"vendor_invoice_number"`
+	OrderNumber         string        `json:"order_number"`
 }
 
 func (h *DocumentHandler) callClaudeVision(apiKey, base64Data, ext string) (*ocrExtractedData, string, error) {
@@ -225,13 +226,16 @@ Return a JSON object with these fields:
 - vendor_name
 - vendor_address
 - document_date (YYYY-MM-DD format)
-- document_number
+- document_number (the document's own reference number)
 - total_amount (number)
 - tax_amount (number)
 - line_items (array of objects with: description, quantity, unit_price, amount, part_number if available)
 - ship_to_address
 - bill_to_address
 - po_references (array of PO numbers referenced)
+- vendor_po_number (the PO Number field on the document — this is the vendor's purchase order number)
+- vendor_invoice_number (the Invoice Number field on the document)
+- order_number (the Order Number field on the document, if present)
 
 Return JSON only, no markdown fences.`
 
@@ -470,7 +474,7 @@ func (h *DocumentHandler) List(c *gin.Context) {
 	}
 	if search := c.Query("search"); search != "" {
 		like := "%" + search + "%"
-		query = query.Where("vendor_name ILIKE ? OR po_number ILIKE ?", like, like)
+		query = query.Where("vendor_name ILIKE ? OR vendor_po_number ILIKE ? OR vendor_invoice_number ILIKE ? OR po_number ILIKE ?", like, like, like, like)
 	}
 
 	// Count total
@@ -522,6 +526,8 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 		VendorName           *string `json:"vendor_name"`
 		DocumentType         *string `json:"document_type"`
 		LocationCode         *string `json:"location_code"`
+		VendorPONumber       *string `json:"vendor_po_number"`
+		VendorInvoiceNumber  *string `json:"vendor_invoice_number"`
 		MatchedTransactionID *string `json:"matched_transaction_id"`
 		MatchedXeroInvoiceID *int    `json:"matched_xero_invoice_id"`
 	}
@@ -542,6 +548,12 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 	}
 	if req.LocationCode != nil {
 		updates["location_code"] = *req.LocationCode
+	}
+	if req.VendorPONumber != nil {
+		updates["vendor_po_number"] = *req.VendorPONumber
+	}
+	if req.VendorInvoiceNumber != nil {
+		updates["vendor_invoice_number"] = *req.VendorInvoiceNumber
 	}
 	if req.MatchedTransactionID != nil {
 		updates["matched_transaction_id"] = *req.MatchedTransactionID
@@ -630,6 +642,46 @@ func (h *DocumentHandler) Match(c *gin.Context) {
 	var doc models.Document
 	h.GormDB.First(&doc, id)
 	c.JSON(http.StatusOK, doc)
+}
+
+// ── POST /documents/:id/record-payment ───────────────────────
+
+func (h *DocumentHandler) RecordPayment(c *gin.Context) {
+	id := c.Param("id")
+
+	var doc models.Document
+	if err := h.GormDB.Where("id = ? AND is_deleted = false", id).First(&doc).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "document not found"})
+		return
+	}
+
+	// If internal PO already assigned, return it
+	if doc.PONumber != nil && *doc.PONumber != "" {
+		c.JSON(http.StatusOK, gin.H{"document": doc, "message": "internal PO already assigned"})
+		return
+	}
+
+	// Read OCR data to detect PO type
+	var ocrData ocrExtractedData
+	if doc.OCRRaw != nil {
+		text := stripJSONFences(*doc.OCRRaw)
+		json.Unmarshal([]byte(text), &ocrData)
+	}
+	// Fallback: populate from doc fields
+	if ocrData.VendorName == "" && doc.VendorName != nil {
+		ocrData.VendorName = *doc.VendorName
+	}
+
+	locationCode := "GEN"
+	if doc.LocationCode != nil && *doc.LocationCode != "" {
+		locationCode = *doc.LocationCode
+	}
+
+	poNumber := generatePONumber(&ocrData, locationCode, doc.ID)
+	doc.PONumber = &poNumber
+	h.GormDB.Model(&doc).Update("po_number", poNumber)
+
+	c.JSON(http.StatusOK, gin.H{"document": doc, "po_number": poNumber})
 }
 
 // ── GET /documents/:id/file ───────────────────────────────────

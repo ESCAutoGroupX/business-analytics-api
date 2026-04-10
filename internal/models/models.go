@@ -814,6 +814,9 @@ type Document struct {
 	Location             *string   `gorm:"column:location" json:"location"`
 	LocationCode         *string   `gorm:"column:location_code" json:"location_code"`
 	PONumber             *string   `gorm:"column:po_number" json:"po_number"`
+	VendorPONumber       *string   `gorm:"column:vendor_po_number" json:"vendor_po_number"`
+	VendorInvoiceNumber  *string   `gorm:"column:vendor_invoice_number" json:"vendor_invoice_number"`
+	OrderNumber          *string   `gorm:"column:order_number" json:"order_number"`
 	MatchedTransactionID *string   `gorm:"column:matched_transaction_id" json:"matched_transaction_id"`
 	MatchedXeroInvoiceID *int      `gorm:"column:matched_xero_invoice_id" json:"matched_xero_invoice_id"`
 	OCRRaw               *string   `gorm:"column:ocr_raw" json:"-"`

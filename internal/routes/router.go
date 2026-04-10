@@ -330,6 +330,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			docs.PATCH("/:id", documentHandler.Update)
 			docs.DELETE("/:id", documentHandler.Delete)
 			docs.POST("/:id/match", documentHandler.Match)
+			docs.POST("/:id/record-payment", documentHandler.RecordPayment)
 			docs.GET("/:id/file", documentHandler.ServeFile)
 		}
 
