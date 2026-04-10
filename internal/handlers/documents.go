@@ -222,7 +222,7 @@ func (h *DocumentHandler) callClaudeVision(apiKey, base64Data, ext string) (*ocr
 
 	userPrompt := `Extract all information from this automotive industry invoice/statement and return JSON only.
 Return a JSON object with these fields:
-- document_type (e.g. "invoice", "statement", "credit_memo", "purchase_order")
+- document_type (e.g. "INVOICE", "STATEMENT", "RECEIPT", "CHECK", "CREDIT_MEMO", "PURCHASE_ORDER")
 - vendor_name
 - vendor_address
 - document_date (YYYY-MM-DD format)
@@ -233,9 +233,14 @@ Return a JSON object with these fields:
 - ship_to_address
 - bill_to_address
 - po_references (array of PO numbers referenced)
-- vendor_po_number (the PO Number field on the document — this is the vendor's purchase order number)
-- vendor_invoice_number (the Invoice Number field on the document)
-- order_number (the Order Number field on the document, if present)
+- vendor_po_number: The P.O. No. or PO Number field on the invoice — this is the customer's purchase order number (e.g. 41381). This is NOT the invoice number.
+- vendor_invoice_number: The Invoice No. or Invoice Number field (e.g. 62119698)
+- order_number: The Order No. field if present
+
+IMPORTANT for automotive parts invoices (WorldPac, NAPA, OReilly, AutoZone, Dorman, etc.):
+- P.O. No. = the repair shop's purchase order number → put in vendor_po_number
+- Invoice No. = the vendor's invoice reference number → put in vendor_invoice_number
+These are DIFFERENT fields — do not confuse them. They appear in separate labeled fields on the document.
 
 Return JSON only, no markdown fences.`
 
