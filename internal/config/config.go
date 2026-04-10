@@ -30,6 +30,9 @@ type Config struct {
 	AnthropicAPIKey        string
 	DocumentsS3Bucket      string
 	AWSRegion              string
+	WickedFileAPIURL       string
+	WickedFileAPIKey       string
+	WickedFileEmailIntake  string
 }
 
 func Load() *Config {
@@ -65,5 +68,8 @@ func Load() *Config {
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),
 		DocumentsS3Bucket:      os.Getenv("DOCUMENTS_S3_BUCKET"),
 		AWSRegion:              os.Getenv("AWS_REGION"),
+		WickedFileAPIURL:       os.Getenv("WICKEDFILE_API_URL"),
+		WickedFileAPIKey:       os.Getenv("WICKEDFILE_API_KEY"),
+		WickedFileEmailIntake:  os.Getenv("WICKEDFILE_EMAIL_INTAKE"),
 	}
 }

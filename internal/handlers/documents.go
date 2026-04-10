@@ -10,7 +10,10 @@ import (
 	"io"
 	"log"
 	"math"
+	"mime/multipart"
 	"net/http"
+	"net/smtp"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -174,6 +177,9 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 			"status":                 "matched",
 		})
 	}
+
+	// Forward to WickedFile (async — don't block the response)
+	go h.forwardToWickedFile(&doc, fileBytes)
 
 	c.JSON(http.StatusOK, gin.H{"document": doc})
 }
@@ -682,4 +688,332 @@ func docStrPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// ── WickedFile Integration ───────────────────────────────────
+
+// getWFSetting reads a WickedFile setting: first from integration_settings table,
+// then falls back to env var / config.
+func (h *DocumentHandler) getWFSetting(key string) string {
+	var val string
+	h.GormDB.Raw("SELECT value FROM integration_settings WHERE key = ?", key).Scan(&val)
+	if val != "" {
+		return val
+	}
+	switch key {
+	case "wickedfile_api_url":
+		return h.Cfg.WickedFileAPIURL
+	case "wickedfile_api_key":
+		return h.Cfg.WickedFileAPIKey
+	case "wickedfile_email_intake":
+		return h.Cfg.WickedFileEmailIntake
+	}
+	return ""
+}
+
+// forwardToWickedFile attempts both API and email intake methods.
+func (h *DocumentHandler) forwardToWickedFile(doc *models.Document, fileBytes []byte) {
+	apiURL := h.getWFSetting("wickedfile_api_url")
+	apiKey := h.getWFSetting("wickedfile_api_key")
+	emailIntake := h.getWFSetting("wickedfile_email_intake")
+
+	if apiURL == "" && apiKey == "" && emailIntake == "" {
+		return // WickedFile not configured
+	}
+
+	sent := false
+
+	// Method 1: API intake
+	if apiURL != "" && apiKey != "" {
+		if err := h.wickedFileAPISend(doc, fileBytes, apiURL, apiKey); err != nil {
+			log.Printf("WickedFile API send failed for doc %d: %v", doc.ID, err)
+		} else {
+			sent = true
+			log.Printf("WickedFile API: sent doc %d", doc.ID)
+		}
+	}
+
+	// Method 2: Email intake (as fallback or additional)
+	if emailIntake != "" && !sent {
+		if err := h.wickedFileEmailSend(doc, fileBytes, emailIntake); err != nil {
+			log.Printf("WickedFile email send failed for doc %d: %v", doc.ID, err)
+		} else {
+			sent = true
+			log.Printf("WickedFile email: sent doc %d to %s", doc.ID, emailIntake)
+		}
+	}
+
+	if sent {
+		now := time.Now()
+		h.GormDB.Model(doc).Updates(map[string]interface{}{
+			"wickedfile_sent":    true,
+			"wickedfile_sent_at": now,
+		})
+	}
+}
+
+// wickedFileAPISend posts the document to WickedFile's intake API.
+func (h *DocumentHandler) wickedFileAPISend(doc *models.Document, fileBytes []byte, apiURL, apiKey string) error {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// Add file
+	part, err := writer.CreateFormFile("file", doc.Filename)
+	if err != nil {
+		return err
+	}
+	part.Write(fileBytes)
+
+	// Build metadata JSON
+	meta := map[string]interface{}{
+		"source": "business-analytics",
+	}
+	if doc.VendorName != nil {
+		meta["vendor_name"] = *doc.VendorName
+	}
+	if doc.DocumentDate != nil {
+		meta["document_date"] = *doc.DocumentDate
+	}
+	if doc.DocumentType != nil {
+		meta["document_type"] = *doc.DocumentType
+	}
+	if doc.Location != nil {
+		meta["location"] = *doc.Location
+	}
+	if doc.PONumber != nil {
+		meta["po_number"] = *doc.PONumber
+	}
+	if doc.TotalAmount != nil {
+		meta["total_amount"] = *doc.TotalAmount
+	}
+
+	metaJSON, _ := json.Marshal(meta)
+	writer.WriteField("metadata", string(metaJSON))
+	writer.Close()
+
+	url := strings.TrimRight(apiURL, "/") + "/api/documents/intake"
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("WickedFile API returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// wickedFileEmailSend sends the document as an email attachment.
+func (h *DocumentHandler) wickedFileEmailSend(doc *models.Document, fileBytes []byte, toAddr string) error {
+	if h.Cfg.SMTPHost == "" || h.Cfg.SMTPPass == "" {
+		return fmt.Errorf("SMTP not configured")
+	}
+
+	from := h.Cfg.SMTPFrom
+	if from == "" {
+		from = h.Cfg.SMTPUser
+	}
+	port := h.Cfg.SMTPPort
+	if port == "" {
+		port = "587"
+	}
+
+	// Build subject
+	docType := "Document"
+	if doc.DocumentType != nil {
+		docType = *doc.DocumentType
+	}
+	vendor := "Unknown"
+	if doc.VendorName != nil {
+		vendor = *doc.VendorName
+	}
+	docDate := "No-Date"
+	if doc.DocumentDate != nil {
+		docDate = *doc.DocumentDate
+	}
+	poNum := ""
+	if doc.PONumber != nil {
+		poNum = *doc.PONumber
+	}
+	subject := fmt.Sprintf("%s - %s - %s", docType, vendor, docDate)
+	if poNum != "" {
+		subject += " - " + poNum
+	}
+
+	// Build plain-text body with metadata
+	bodyText := fmt.Sprintf("Document forwarded from Business Analytics\n\n"+
+		"Vendor: %s\nDate: %s\nType: %s\nPO #: %s\n",
+		vendor, docDate, docType, poNum)
+	if doc.TotalAmount != nil {
+		bodyText += fmt.Sprintf("Amount: $%.2f\n", *doc.TotalAmount)
+	}
+	if doc.Location != nil {
+		bodyText += fmt.Sprintf("Location: %s\n", *doc.Location)
+	}
+
+	// Build MIME multipart email with attachment
+	buf := &bytes.Buffer{}
+	mw := multipart.NewWriter(buf)
+
+	// Headers
+	headers := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n"+
+		"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=%s\r\n\r\n",
+		from, toAddr, subject, mw.Boundary())
+
+	// Text part
+	textHeader := textproto.MIMEHeader{}
+	textHeader.Set("Content-Type", "text/plain; charset=utf-8")
+	textPart, _ := mw.CreatePart(textHeader)
+	textPart.Write([]byte(bodyText))
+
+	// Attachment part
+	ext := strings.ToLower(filepath.Ext(doc.Filename))
+	mimeType := "application/octet-stream"
+	switch ext {
+	case ".pdf":
+		mimeType = "application/pdf"
+	case ".jpg", ".jpeg":
+		mimeType = "image/jpeg"
+	case ".png":
+		mimeType = "image/png"
+	}
+
+	attHeader := textproto.MIMEHeader{}
+	attHeader.Set("Content-Type", mimeType)
+	attHeader.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", doc.Filename))
+	attHeader.Set("Content-Transfer-Encoding", "base64")
+	attPart, _ := mw.CreatePart(attHeader)
+	encoded := base64.StdEncoding.EncodeToString(fileBytes)
+	// Wrap at 76 chars for MIME compliance
+	for i := 0; i < len(encoded); i += 76 {
+		end := i + 76
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		attPart.Write([]byte(encoded[i:end] + "\r\n"))
+	}
+
+	mw.Close()
+
+	msg := []byte(headers + buf.String())
+
+	auth := smtp.PlainAuth("", h.Cfg.SMTPUser, h.Cfg.SMTPPass, h.Cfg.SMTPHost)
+	addr := h.Cfg.SMTPHost + ":" + port
+
+	return smtp.SendMail(addr, auth, from, []string{toAddr}, msg)
+}
+
+// ── Settings Endpoints ───────────────────────────────────────
+
+// GET /settings/integrations — return WickedFile settings
+func (h *DocumentHandler) GetIntegrationSettings(c *gin.Context) {
+	keys := []string{"wickedfile_api_url", "wickedfile_api_key", "wickedfile_email_intake"}
+	result := map[string]string{}
+	for _, k := range keys {
+		result[k] = h.getWFSetting(k)
+	}
+	// Mask the API key for display
+	if key := result["wickedfile_api_key"]; len(key) > 8 {
+		result["wickedfile_api_key"] = key[:4] + strings.Repeat("*", len(key)-8) + key[len(key)-4:]
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// PUT /settings/integrations — save WickedFile settings
+func (h *DocumentHandler) SaveIntegrationSettings(c *gin.Context) {
+	var body map[string]string
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
+
+	allowed := map[string]bool{
+		"wickedfile_api_url":      true,
+		"wickedfile_api_key":      true,
+		"wickedfile_email_intake": true,
+	}
+
+	for k, v := range body {
+		if !allowed[k] {
+			continue
+		}
+		// Skip masked API keys (unchanged)
+		if k == "wickedfile_api_key" && strings.Contains(v, "****") {
+			continue
+		}
+		h.GormDB.Exec(
+			`INSERT INTO integration_settings (key, value, updated_at)
+			 VALUES (?, ?, NOW())
+			 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+			k, v,
+		)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "settings saved"})
+}
+
+// POST /settings/integrations/test-wickedfile — test connection
+func (h *DocumentHandler) TestWickedFileConnection(c *gin.Context) {
+	var body map[string]string
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
+
+	apiURL := body["wickedfile_api_url"]
+	apiKey := body["wickedfile_api_key"]
+	emailIntake := body["wickedfile_email_intake"]
+
+	// If API key is masked, use stored value
+	if strings.Contains(apiKey, "****") {
+		apiKey = h.getWFSetting("wickedfile_api_key")
+	}
+
+	results := gin.H{}
+
+	// Test API connection
+	if apiURL != "" && apiKey != "" {
+		url := strings.TrimRight(apiURL, "/") + "/api/health"
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		httpClient := &http.Client{Timeout: 10 * time.Second}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			results["api_status"] = "error"
+			results["api_message"] = err.Error()
+		} else {
+			resp.Body.Close()
+			if resp.StatusCode < 400 {
+				results["api_status"] = "ok"
+				results["api_message"] = fmt.Sprintf("Connected (%d)", resp.StatusCode)
+			} else {
+				results["api_status"] = "error"
+				results["api_message"] = fmt.Sprintf("HTTP %d", resp.StatusCode)
+			}
+		}
+	}
+
+	// Validate email
+	if emailIntake != "" {
+		if strings.Contains(emailIntake, "@") {
+			results["email_status"] = "ok"
+			results["email_message"] = fmt.Sprintf("Will send to %s", emailIntake)
+		} else {
+			results["email_status"] = "error"
+			results["email_message"] = "Invalid email address"
+		}
+	}
+
+	c.JSON(http.StatusOK, results)
 }

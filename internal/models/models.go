@@ -820,9 +820,24 @@ type Document struct {
 	OCRConfidence        *float64  `gorm:"column:ocr_confidence" json:"ocr_confidence"`
 	Status               string    `gorm:"column:status;default:pending" json:"status"`
 	UploadedBy           *string   `gorm:"column:uploaded_by" json:"uploaded_by"`
-	IsDeleted            bool      `gorm:"column:is_deleted;default:false" json:"-"`
-	CreatedAt            time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-	UpdatedAt            time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	IsDeleted            bool       `gorm:"column:is_deleted;default:false" json:"-"`
+	WickedFileSent       bool       `gorm:"column:wickedfile_sent;default:false" json:"wickedfile_sent"`
+	WickedFileSentAt     *time.Time `gorm:"column:wickedfile_sent_at" json:"wickedfile_sent_at"`
+	CreatedAt            time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt            time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }
 
 func (Document) TableName() string { return "documents" }
+
+// ──────────────────────────────────────────────
+// Integration Settings (key-value store)
+// ──────────────────────────────────────────────
+
+type IntegrationSetting struct {
+	ID        int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	Key       string    `gorm:"column:key;uniqueIndex;not null" json:"key"`
+	Value     string    `gorm:"column:value" json:"value"`
+	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+}
+
+func (IntegrationSetting) TableName() string { return "integration_settings" }

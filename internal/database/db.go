@@ -77,6 +77,7 @@ func ConnectGORM(databaseURL string) (*gorm.DB, error) {
 		&models.ReconciliationOverride{},
 		&models.DailyBalanceSnapshot{},
 		&models.Document{},
+		&models.IntegrationSetting{},
 	} {
 		if err := db.AutoMigrate(model); err != nil {
 			log.Printf("WARN: AutoMigrate %T: %v", model, err)

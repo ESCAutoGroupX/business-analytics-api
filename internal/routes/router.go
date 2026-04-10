@@ -333,6 +333,14 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			docs.GET("/:id/file", documentHandler.ServeFile)
 		}
 
+		// Settings / Integrations
+		settings := protected.Group("/settings")
+		{
+			settings.GET("/integrations", documentHandler.GetIntegrationSettings)
+			settings.PUT("/integrations", documentHandler.SaveIntegrationSettings)
+			settings.POST("/integrations/test-wickedfile", documentHandler.TestWickedFileConnection)
+		}
+
 		// Locations
 		locations := protected.Group("/locations")
 		{
