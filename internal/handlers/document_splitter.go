@@ -46,11 +46,12 @@ func countPDFPages(pdfPath string) int {
 
 // pdfToPageImages converts a PDF into per-page JPEG images using Ghostscript.
 // Returns a slice of file paths (1-indexed: page 1 → index 0).
-func pdfToPageImages(pdfPath, outDir string) ([]string, error) {
+func pdfToPageImages(pdfPath, outDir string, pageCount int) ([]string, error) {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return nil, err
 	}
 
+	// Try batch conversion first
 	outPattern := filepath.Join(outDir, "page_%d.jpg")
 	cmd := exec.Command("gs",
 		"-dBATCH", "-dNOPAUSE", "-dNOSAFER",
@@ -58,8 +59,13 @@ func pdfToPageImages(pdfPath, outDir string) ([]string, error) {
 		fmt.Sprintf("-sOutputFile=%s", outPattern),
 		pdfPath,
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("gs failed: %v: %s", err, string(out))
+	log.Printf("splitter: running gs batch: %s", cmd.String())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("splitter: gs batch failed: %v\nOutput: %s", err, string(out))
+		// Fallback: convert one page at a time
+		log.Printf("splitter: trying per-page gs fallback for %d pages", pageCount)
+		return pdfToPageImagesFallback(pdfPath, outDir, pageCount)
 	}
 
 	// Collect generated files
@@ -72,8 +78,39 @@ func pdfToPageImages(pdfPath, outDir string) ([]string, error) {
 		paths = append(paths, p)
 	}
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("gs produced no output pages")
+		log.Printf("splitter: gs batch produced 0 files, trying per-page fallback")
+		return pdfToPageImagesFallback(pdfPath, outDir, pageCount)
 	}
+	log.Printf("splitter: gs batch produced %d page images", len(paths))
+	return paths, nil
+}
+
+// pdfToPageImagesFallback converts each page individually using -dFirstPage/-dLastPage.
+func pdfToPageImagesFallback(pdfPath, outDir string, pageCount int) ([]string, error) {
+	var paths []string
+	for i := 1; i <= pageCount; i++ {
+		outPath := filepath.Join(outDir, fmt.Sprintf("page_%d.jpg", i))
+		cmd := exec.Command("gs",
+			"-dBATCH", "-dNOPAUSE", "-dNOSAFER",
+			"-sDEVICE=jpeg", "-r150", "-dJPEGQ=85",
+			fmt.Sprintf("-dFirstPage=%d", i),
+			fmt.Sprintf("-dLastPage=%d", i),
+			fmt.Sprintf("-sOutputFile=%s", outPath),
+			pdfPath,
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("splitter: gs page %d failed: %v — %s", i, err, string(out))
+			continue
+		}
+		if _, err := os.Stat(outPath); err == nil {
+			paths = append(paths, outPath)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("gs per-page fallback produced no output")
+	}
+	log.Printf("splitter: per-page fallback produced %d/%d page images", len(paths), pageCount)
 	return paths, nil
 }
 
@@ -226,7 +263,7 @@ func (h *DocumentHandler) detectMultiInvoicePDF(apiKey, pdfPath, ext string) ([]
 		return nil, tmpDir, fmt.Errorf("create temp dir: %w", err)
 	}
 
-	pageImages, err := pdfToPageImages(pdfPath, tmpDir)
+	pageImages, err := pdfToPageImages(pdfPath, tmpDir, pageCount)
 	if err != nil {
 		return nil, tmpDir, fmt.Errorf("pdf to images: %w", err)
 	}

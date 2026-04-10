@@ -177,12 +177,26 @@ func (h *DocumentHandler) agent1Classify(apiKey, b64, mediaType, blockType strin
   "vendor_name": "exact company name",
   "vendor_type": "PARTS|SUPPLIES|OFFICE|TOOLS|UTILITY|OTHER",
   "document_type": "INVOICE|STATEMENT|RECEIPT|CREDIT_MEMO|OTHER",
-  "document_format": "WORLDPAC|NAPA|OREILLY|AUTOZONE|DORMAN|MOTORCRAFT|GATES|GENERIC",
+  "document_format": "WORLDPAC|NAPA|OREILLY|AUTOZONE|DORMAN|MOTORCRAFT|GATES|CARQUEST|ADVANCE|GENERIC",
   "confidence": 0.0-1.0
-}`
+}
+
+IMPORTANT: Look at the LOGO and HEADER at the TOP of the document — the large company name or logo is the VENDOR (the company SELLING the parts). Do NOT use addresses from the body, ship-to, or bill-to sections.
+
+Common automotive parts vendors:
+- CarQuest logo → vendor_name: "CARQUEST", document_format: "CARQUEST"
+- NAPA logo → vendor_name: "NAPA AUTO PARTS", document_format: "NAPA"
+- WorldPac → vendor_name: "WorldPac", document_format: "WORLDPAC"
+- O'Reilly → vendor_name: "O'Reilly Auto Parts", document_format: "OREILLY"
+- AutoZone → vendor_name: "AutoZone", document_format: "AUTOZONE"
+- Advance Auto Parts → vendor_name: "Advance Auto Parts", document_format: "ADVANCE"
+- Dorman → vendor_name: "Dorman", document_format: "DORMAN"
+- Gates → vendor_name: "Gates", document_format: "GATES"
+- Motorcraft → vendor_name: "Motorcraft", document_format: "MOTORCRAFT"
+- Genuine Parts Company → vendor_name: "Genuine Parts Company", document_format: "NAPA"`
 
 	text, err := h.callClaudeWithImage(apiKey, b64, mediaType, blockType,
-		"You are a document classification expert for automotive repair shops. Respond with JSON only.",
+		"You are a document classification expert for automotive repair shops. Identify the VENDOR from the logo/header at the top of the document. Respond with JSON only.",
 		prompt)
 	if err != nil {
 		return nil, err
