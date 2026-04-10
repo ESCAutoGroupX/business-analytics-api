@@ -45,6 +45,14 @@ type extractorResult struct {
 	AccountNumber       string        `json:"account_number"`
 	ShipFrom            string        `json:"ship_from"`
 	SalesPerson         string        `json:"sales_person"`
+	// Statement-specific fields
+	StatementDate    string  `json:"statement_date"`
+	PeriodStart      string  `json:"period_start"`
+	PeriodEnd        string  `json:"period_end"`
+	PreviousBalance  float64 `json:"previous_balance"`
+	NewCharges       float64 `json:"new_charges"`
+	PaymentsReceived float64 `json:"payments_received"`
+	BalanceDue       float64 `json:"balance_due"`
 }
 
 type validatorResult struct {
@@ -91,11 +99,29 @@ func (h *DocumentHandler) runPipeline(apiKey, base64Data, ext string) (*ocrExtra
 	log.Printf("pipeline: agent1 done — vendor=%s format=%s confidence=%.2f", agent1.VendorName, agent1.DocumentFormat, agent1.Confidence)
 
 	// ── Agent 2: Vendor-specific extractor ───────────────────
-	log.Printf("pipeline: agent2 extractor starting (format=%s)", agent1.DocumentFormat)
-	agent2, err := h.agent2Extract(apiKey, base64Data, mediaType, contentBlockType, agent1.DocumentFormat)
-	if err != nil {
-		log.Printf("pipeline: agent2 failed: %v — falling back to single-agent", err)
-		return h.fallbackSingleAgent(apiKey, base64Data, ext)
+	isStatement := strings.EqualFold(agent1.DocumentType, "STATEMENT")
+	var agent2 *extractorResult
+	if isStatement {
+		log.Printf("pipeline: agent2 statement extractor starting (vendor=%s)", agent1.VendorName)
+		agent2, err = h.agent2ExtractStatement(apiKey, base64Data, mediaType, contentBlockType)
+		if err != nil {
+			log.Printf("pipeline: agent2 statement failed: %v — falling back to single-agent", err)
+			return h.fallbackSingleAgent(apiKey, base64Data, ext)
+		}
+		// Use balance_due as total for statements
+		if agent2.BalanceDue != 0 {
+			agent2.TotalAmount = agent2.BalanceDue
+		}
+		if agent2.DocumentDate == "" && agent2.StatementDate != "" {
+			agent2.DocumentDate = agent2.StatementDate
+		}
+	} else {
+		log.Printf("pipeline: agent2 extractor starting (format=%s)", agent1.DocumentFormat)
+		agent2, err = h.agent2Extract(apiKey, base64Data, mediaType, contentBlockType, agent1.DocumentFormat)
+		if err != nil {
+			log.Printf("pipeline: agent2 failed: %v — falling back to single-agent", err)
+			return h.fallbackSingleAgent(apiKey, base64Data, ext)
+		}
 	}
 	output.Agent2Extractor = agent2
 	log.Printf("pipeline: agent2 done — po=%s inv=%s total=%.2f", agent2.VendorPONumber, agent2.VendorInvoiceNumber, agent2.TotalAmount)

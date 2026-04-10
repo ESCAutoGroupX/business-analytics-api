@@ -41,6 +41,12 @@ type vendorUpdateRequest struct {
 	IsCogsVendor      *bool   `json:"is_cogs_vendor"`
 	IsStatementVendor *bool   `json:"is_statement_vendor"`
 	GLCodeID          *string `json:"gl_code_id"`
+	BillingFrequency  *string `json:"billing_frequency"`
+	PaymentTerms      *string `json:"payment_terms"`
+	TypicalPOPrefix   *string `json:"typical_po_prefix"`
+	StatementDueDay   *int    `json:"statement_due_day"`
+	AlertDaysBefore   *int    `json:"alert_days_before"`
+	Notes             *string `json:"notes"`
 }
 
 type vendorResponse struct {
@@ -55,6 +61,11 @@ type vendorResponse struct {
 	NormalizedName    *string     `json:"normalized_name"`
 	BillingFrequency  *string     `json:"billing_frequency"`
 	PaymentTerms      *string     `json:"payment_terms"`
+	TypicalPOPrefix   *string     `json:"typical_po_prefix"`
+	StatementDueDay   *int        `json:"statement_due_day"`
+	AlertDaysBefore   *int        `json:"alert_days_before"`
+	Notes             *string     `json:"notes"`
+	GLCodeID          *string     `json:"gl_code_id"`
 	CreatedAt         *time.Time  `json:"created_at"`
 	UpdatedAt         *time.Time  `json:"updated_at"`
 	GLCode            interface{} `json:"gl_code"`
@@ -69,15 +80,20 @@ func vendorToResponse(v *models.Vendor) vendorResponse {
 		ShopName:          v.ShopName,
 		IsCogsVendor:      v.IsCogsVendor != nil && *v.IsCogsVendor,
 		IsStatementVendor: v.IsStatementVendor != nil && *v.IsStatementVendor,
+		NormalizedName:    v.NormalizedName,
+		BillingFrequency:  v.BillingFrequency,
+		PaymentTerms:      v.PaymentTerms,
+		TypicalPOPrefix:   v.TypicalPOPrefix,
+		StatementDueDay:   v.StatementDueDay,
+		AlertDaysBefore:   v.AlertDaysBefore,
+		Notes:             v.Notes,
+		GLCodeID:          v.GLCodeID,
 		CreatedAt:         &v.CreatedAt,
 		UpdatedAt:         &v.UpdatedAt,
 	}
 	if v.IsPartsVendor != nil {
 		resp.IsPartsVendor = *v.IsPartsVendor
 	}
-	resp.NormalizedName = v.NormalizedName
-	resp.BillingFrequency = v.BillingFrequency
-	resp.PaymentTerms = v.PaymentTerms
 	if v.GLCode != nil {
 		resp.GLCode = gin.H{
 			"id": v.GLCode.ID, "name": v.GLCode.Name,
@@ -188,6 +204,28 @@ func (h *VendorHandler) PatchVendor(c *gin.Context) {
 	}
 	if req.GLCodeID != nil {
 		updates["gl_code_id"] = *req.GLCodeID
+	}
+	if req.BillingFrequency != nil {
+		updates["billing_frequency"] = *req.BillingFrequency
+	}
+	if req.PaymentTerms != nil {
+		updates["payment_terms"] = *req.PaymentTerms
+	}
+	if req.TypicalPOPrefix != nil {
+		updates["typical_po_prefix"] = *req.TypicalPOPrefix
+	}
+	if req.StatementDueDay != nil {
+		updates["statement_due_day"] = *req.StatementDueDay
+	}
+	if req.AlertDaysBefore != nil {
+		updates["alert_days_before"] = *req.AlertDaysBefore
+	}
+	if req.Notes != nil {
+		updates["notes"] = *req.Notes
+	}
+	if req.Name != nil {
+		normalized := strings.ToLower(strings.TrimSpace(*req.Name))
+		updates["normalized_name"] = normalized
 	}
 
 	if len(updates) > 0 {

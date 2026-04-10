@@ -855,3 +855,48 @@ type IntegrationSetting struct {
 }
 
 func (IntegrationSetting) TableName() string { return "integration_settings" }
+
+// ──────────────────────────────────────────────
+// Accounts Payable
+// ──────────────────────────────────────────────
+
+type APEntry struct {
+	ID                  int        `gorm:"primaryKey;autoIncrement" json:"id"`
+	VendorID            *string    `gorm:"column:vendor_id" json:"vendor_id"`
+	VendorName          *string    `gorm:"column:vendor_name" json:"vendor_name"`
+	StatementDocumentID *int       `gorm:"column:statement_document_id" json:"statement_document_id"`
+	PeriodStart         *string    `gorm:"column:period_start" json:"period_start"`
+	PeriodEnd           *string    `gorm:"column:period_end" json:"period_end"`
+	TotalAmount         *float64   `gorm:"column:total_amount" json:"total_amount"`
+	MatchedAmount       *float64   `gorm:"column:matched_amount" json:"matched_amount"`
+	UnmatchedAmount     *float64   `gorm:"column:unmatched_amount" json:"unmatched_amount"`
+	InvoiceCount        int        `gorm:"column:invoice_count" json:"invoice_count"`
+	MatchedInvoiceCount int        `gorm:"column:matched_invoice_count" json:"matched_invoice_count"`
+	Status              string     `gorm:"column:status;default:open" json:"status"`
+	AuthorizedBy        *string    `gorm:"column:authorized_by" json:"authorized_by"`
+	AuthorizedAt        *time.Time `gorm:"column:authorized_at" json:"authorized_at"`
+	PaidAt              *time.Time `gorm:"column:paid_at" json:"paid_at"`
+	PaymentMethod       *string    `gorm:"column:payment_method" json:"payment_method"`
+	PaymentReference    *string    `gorm:"column:payment_reference" json:"payment_reference"`
+	BankAccount         *string    `gorm:"column:bank_account" json:"bank_account"`
+	Notes               *string    `gorm:"column:notes" json:"notes"`
+	CreatedAt           time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt           time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+}
+
+func (APEntry) TableName() string { return "ap_entries" }
+
+type StatementLineItem struct {
+	ID                  int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	StatementDocumentID *int      `gorm:"column:statement_document_id" json:"statement_document_id"`
+	InvoiceNumber       *string   `gorm:"column:invoice_number" json:"invoice_number"`
+	InvoiceDate         *string   `gorm:"column:invoice_date" json:"invoice_date"`
+	Amount              *float64  `gorm:"column:amount" json:"amount"`
+	Description         *string   `gorm:"column:description" json:"description"`
+	LinkedDocumentID    *int      `gorm:"column:linked_document_id" json:"linked_document_id"`
+	LinkedTransactionID *string   `gorm:"column:linked_transaction_id" json:"linked_transaction_id"`
+	Status              string    `gorm:"column:status;default:unmatched" json:"status"`
+	CreatedAt           time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+}
+
+func (StatementLineItem) TableName() string { return "statement_line_items" }
