@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	syncAtomic "sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -764,6 +765,137 @@ func (h *DocumentHandler) Summary(c *gin.Context) {
 		"this_month": thisMonth,
 	})
 }
+
+// ── Rescan All Documents ──────────────────────────────────────
+
+var (
+	rescanRunning   int32 // atomic: 1 = running, 0 = idle
+	rescanTotal     int32
+	rescanCompleted int32
+)
+
+// POST /documents/rescan-all
+func (h *DocumentHandler) RescanAll(c *gin.Context) {
+	// Prevent concurrent rescans
+	if !atomicCAS(&rescanRunning, 0, 1) {
+		c.JSON(http.StatusConflict, gin.H{"detail": "rescan already in progress", "completed": atomicLoad(&rescanCompleted), "total": atomicLoad(&rescanTotal)})
+		return
+	}
+
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		atomicStore(&rescanRunning, 0)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "ANTHROPIC_API_KEY not configured"})
+		return
+	}
+
+	var docs []models.Document
+	h.GormDB.Where("is_deleted = false").Find(&docs)
+
+	total := int32(len(docs))
+	atomicStore(&rescanTotal, total)
+	atomicStore(&rescanCompleted, 0)
+
+	c.JSON(http.StatusOK, gin.H{"status": "started", "total": total})
+
+	go func() {
+		defer atomicStore(&rescanRunning, 0)
+
+		for _, doc := range docs {
+			log.Printf("Rescanning document %d: %s", doc.ID, doc.Filename)
+
+			fileBytes, err := os.ReadFile(doc.FilePath)
+			if err != nil {
+				log.Printf("rescan doc %d: cannot read file %s: %v", doc.ID, doc.FilePath, err)
+				atomicAdd(&rescanCompleted, 1)
+				continue
+			}
+
+			ext := strings.ToLower(filepath.Ext(doc.Filename))
+			b64 := base64.StdEncoding.EncodeToString(fileBytes)
+
+			ocrResult, ocrRaw, confidence, agentVersion, err := h.runPipeline(apiKey, b64, ext)
+			if err != nil {
+				log.Printf("rescan doc %d: pipeline error: %v", doc.ID, err)
+				atomicAdd(&rescanCompleted, 1)
+				continue
+			}
+
+			locationCode := matchLocation(ocrResult.ShipToAddress, ocrResult.BillToAddress)
+
+			status := "pending"
+			if confidence > 0.85 {
+				status = "auto_matched"
+			} else if confidence < 0.60 {
+				status = "needs_review"
+			}
+
+			updates := map[string]interface{}{
+				"document_type":        ocrResult.DocumentType,
+				"vendor_name":          ocrResult.VendorName,
+				"vendor_address":       ocrResult.VendorAddress,
+				"document_date":        ocrResult.DocumentDate,
+				"document_number":      ocrResult.DocumentNumber,
+				"vendor_po_number":     ocrResult.VendorPONumber,
+				"vendor_invoice_number": ocrResult.VendorInvoiceNumber,
+				"order_number":         ocrResult.OrderNumber,
+				"ocr_raw":             ocrRaw,
+				"ocr_confidence":      confidence,
+				"ocr_agent_version":   agentVersion,
+				"status":              status,
+			}
+
+			if ocrResult.TotalAmount != 0 {
+				updates["total_amount"] = ocrResult.TotalAmount
+			}
+			if ocrResult.TaxAmount != 0 {
+				updates["tax_amount"] = ocrResult.TaxAmount
+			}
+			if ocrResult.LineItems != nil {
+				liJSON, _ := json.Marshal(ocrResult.LineItems)
+				updates["line_items"] = string(liJSON)
+			}
+			if locationCode != "" {
+				updates["location_code"] = locationCode
+				updates["location"] = locationCode
+			}
+
+			// Check agent4 match
+			for _, ref := range ocrResult.POReferences {
+				if strings.HasPrefix(ref, "agent4_match:") {
+					matchID := strings.TrimPrefix(ref, "agent4_match:")
+					updates["matched_transaction_id"] = matchID
+					if status != "auto_matched" {
+						updates["status"] = "matched"
+					}
+					break
+				}
+			}
+
+			h.GormDB.Model(&models.Document{}).Where("id = ?", doc.ID).Updates(updates)
+			atomicAdd(&rescanCompleted, 1)
+			log.Printf("Rescanned document %d: confidence=%.2f status=%s", doc.ID, confidence, updates["status"])
+		}
+		log.Printf("Rescan complete: %d/%d documents processed", atomicLoad(&rescanCompleted), total)
+	}()
+}
+
+// GET /documents/rescan-status
+func (h *DocumentHandler) RescanStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"completed": atomicLoad(&rescanCompleted),
+		"total":     atomicLoad(&rescanTotal),
+		"running":   atomicLoad(&rescanRunning) == 1,
+	})
+}
+
+// atomic helpers
+func atomicCAS(addr *int32, old, new int32) bool {
+	return syncAtomic.CompareAndSwapInt32(addr, old, new)
+}
+func atomicStore(addr *int32, val int32) { syncAtomic.StoreInt32(addr, val) }
+func atomicLoad(addr *int32) int32       { return syncAtomic.LoadInt32(addr) }
+func atomicAdd(addr *int32, delta int32) { syncAtomic.AddInt32(addr, delta) }
 
 // ── Helpers ───────────────────────────────────────────────────
 
