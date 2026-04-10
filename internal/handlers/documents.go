@@ -101,9 +101,10 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		return
 	}
 
-	ocrResult, ocrRaw, err := h.callClaudeVision(apiKey, base64Data, ext)
+	// Run multi-agent pipeline (falls back to single-agent on failure)
+	ocrResult, ocrRaw, confidence, agentVersion, err := h.runPipeline(apiKey, base64Data, ext)
 	if err != nil {
-		log.Printf("documents: Claude Vision API error: %v", err)
+		log.Printf("documents: pipeline error: %v", err)
 		// Save document even if OCR fails
 		doc := models.Document{
 			Filename: file.Filename,
@@ -119,6 +120,14 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	// Match location from addresses
 	locationCode := matchLocation(ocrResult.ShipToAddress, ocrResult.BillToAddress)
 
+	// Determine status based on confidence
+	status := "pending"
+	if confidence > 0.85 {
+		status = "auto_matched"
+	} else if confidence < 0.60 {
+		status = "needs_review"
+	}
+
 	// Build document record
 	doc := models.Document{
 		Filename:            file.Filename,
@@ -132,8 +141,10 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		VendorPONumber:      docStrPtr(ocrResult.VendorPONumber),
 		VendorInvoiceNumber: docStrPtr(ocrResult.VendorInvoiceNumber),
 		OrderNumber:         docStrPtr(ocrResult.OrderNumber),
-		Status:              "pending",
+		Status:              status,
 		OCRRaw:              docStrPtr(ocrRaw),
+		OCRConfidence:       &confidence,
+		OCRAgentVersion:     docStrPtr(agentVersion),
 	}
 
 	if ocrResult.TotalAmount != 0 {
@@ -156,24 +167,40 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		doc.Location = &locName
 	}
 
-	// Create document first so we have the ID for PO number
+	// Check if agent4 found a transaction match
+	var agent4MatchID string
+	for _, ref := range ocrResult.POReferences {
+		if strings.HasPrefix(ref, "agent4_match:") {
+			agent4MatchID = strings.TrimPrefix(ref, "agent4_match:")
+			break
+		}
+	}
+
+	if agent4MatchID != "" {
+		doc.MatchedTransactionID = &agent4MatchID
+		if status != "auto_matched" {
+			doc.Status = "matched"
+		}
+	}
+
+	// Create document
 	if err := h.GormDB.Create(&doc).Error; err != nil {
 		log.Printf("documents: failed to save document: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to save document"})
 		return
 	}
 
-	// Internal PO number is NOT generated on upload — only when payment is recorded.
-
-	// Auto-match to transactions
-	matchedTxnID := h.autoMatchTransaction(ocrResult.TotalAmount, ocrResult.DocumentDate, ocrResult.VendorName)
-	if matchedTxnID != "" {
-		doc.MatchedTransactionID = &matchedTxnID
-		doc.Status = "matched"
-		h.GormDB.Model(&doc).Updates(map[string]interface{}{
-			"matched_transaction_id": matchedTxnID,
-			"status":                 "matched",
-		})
+	// If pipeline didn't match, try legacy auto-match as fallback
+	if agent4MatchID == "" {
+		matchedTxnID := h.autoMatchTransaction(ocrResult.TotalAmount, ocrResult.DocumentDate, ocrResult.VendorName)
+		if matchedTxnID != "" {
+			doc.MatchedTransactionID = &matchedTxnID
+			doc.Status = "matched"
+			h.GormDB.Model(&doc).Updates(map[string]interface{}{
+				"matched_transaction_id": matchedTxnID,
+				"status":                 "matched",
+			})
+		}
 	}
 
 	// Forward to WickedFile (async — don't block the response)

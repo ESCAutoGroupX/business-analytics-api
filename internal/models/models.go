@@ -821,6 +821,7 @@ type Document struct {
 	MatchedXeroInvoiceID *int      `gorm:"column:matched_xero_invoice_id" json:"matched_xero_invoice_id"`
 	OCRRaw               *string   `gorm:"column:ocr_raw" json:"-"`
 	OCRConfidence        *float64  `gorm:"column:ocr_confidence" json:"ocr_confidence"`
+	OCRAgentVersion      *string   `gorm:"column:ocr_agent_version" json:"ocr_agent_version"`
 	Status               string    `gorm:"column:status;default:pending" json:"status"`
 	UploadedBy           *string   `gorm:"column:uploaded_by" json:"uploaded_by"`
 	IsDeleted            bool       `gorm:"column:is_deleted;default:false" json:"-"`
