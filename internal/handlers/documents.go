@@ -972,6 +972,13 @@ func (h *DocumentHandler) reprocessSingleDocument(apiKey string, doc models.Docu
 
 	ext := strings.ToLower(filepath.Ext(doc.Filename))
 
+	// Delete any existing children so reprocessing is idempotent
+	if res := h.GormDB.Exec("DELETE FROM documents WHERE parent_document_id = ?", doc.ID); res.Error != nil {
+		log.Printf("reprocess doc %d: failed to delete old children: %v", doc.ID, res.Error)
+	} else if res.RowsAffected > 0 {
+		log.Printf("reprocess doc %d: deleted %d old children", doc.ID, res.RowsAffected)
+	}
+
 	// Try multi-invoice splitting for PDFs
 	groups, tmpDir, splitErr := h.detectMultiInvoicePDF(apiKey, doc.FilePath, ext)
 	if tmpDir != "" {
@@ -982,9 +989,7 @@ func (h *DocumentHandler) reprocessSingleDocument(apiKey string, doc models.Docu
 	}
 
 	if len(groups) > 1 {
-		// Multi-invoice — delete old children, create new ones
-		h.GormDB.Model(&models.Document{}).Where("parent_document_id = ?", doc.ID).Update("is_deleted", true)
-
+		// Multi-invoice — create new children (old children already deleted above)
 		safeFilename := filepath.Base(doc.FilePath)
 		childDocs := h.processMultiInvoicePDFWithParent(apiKey, doc.Filename, doc.FilePath, safeFilename, ext, groups, fileBytes, doc.ID)
 
