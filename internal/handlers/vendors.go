@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,9 @@ type vendorCreateRequest struct {
 	IsCogsVendor      bool    `json:"is_cogs_vendor"`
 	IsStatementVendor bool    `json:"is_statement_vendor"`
 	GLCodeID          *string `json:"gl_code_id"`
+	BillingFrequency  *string `json:"billing_frequency"`
+	PaymentTerms      *string `json:"payment_terms"`
+	TypicalPOPrefix   *string `json:"typical_po_prefix"`
 }
 
 type vendorUpdateRequest struct {
@@ -48,6 +52,9 @@ type vendorResponse struct {
 	IsPartsVendor     string      `json:"is_parts_vendor"`
 	IsCogsVendor      bool        `json:"is_cogs_vendor"`
 	IsStatementVendor bool        `json:"is_statement_vendor"`
+	NormalizedName    *string     `json:"normalized_name"`
+	BillingFrequency  *string     `json:"billing_frequency"`
+	PaymentTerms      *string     `json:"payment_terms"`
 	CreatedAt         *time.Time  `json:"created_at"`
 	UpdatedAt         *time.Time  `json:"updated_at"`
 	GLCode            interface{} `json:"gl_code"`
@@ -68,6 +75,9 @@ func vendorToResponse(v *models.Vendor) vendorResponse {
 	if v.IsPartsVendor != nil {
 		resp.IsPartsVendor = *v.IsPartsVendor
 	}
+	resp.NormalizedName = v.NormalizedName
+	resp.BillingFrequency = v.BillingFrequency
+	resp.PaymentTerms = v.PaymentTerms
 	if v.GLCode != nil {
 		resp.GLCode = gin.H{
 			"id": v.GLCode.ID, "name": v.GLCode.Name,
@@ -91,6 +101,8 @@ func (h *VendorHandler) CreateVendor(c *gin.Context) {
 	isCogsVendor := req.IsCogsVendor
 	isStatementVendor := req.IsStatementVendor
 
+	normalizedName := strings.ToLower(strings.TrimSpace(req.Name))
+
 	vendor := models.Vendor{
 		ID:                uuid.New().String(),
 		Name:              req.Name,
@@ -101,6 +113,10 @@ func (h *VendorHandler) CreateVendor(c *gin.Context) {
 		IsCogsVendor:      &isCogsVendor,
 		IsStatementVendor: &isStatementVendor,
 		GLCodeID:          req.GLCodeID,
+		NormalizedName:    &normalizedName,
+		BillingFrequency:  req.BillingFrequency,
+		PaymentTerms:      req.PaymentTerms,
+		TypicalPOPrefix:   req.TypicalPOPrefix,
 	}
 
 	if err := h.GormDB.Create(&vendor).Error; err != nil {
@@ -216,4 +232,25 @@ func (h *VendorHandler) getVendorByID(c *gin.Context, id string) {
 	}
 
 	c.JSON(http.StatusOK, vendorToResponse(&vendor))
+}
+
+// LookupVendor handles GET /vendors/lookup?name=X — vendor lookup by name.
+func (h *VendorHandler) LookupVendor(c *gin.Context) {
+	name := c.Query("name")
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "name query parameter required"})
+		return
+	}
+
+	var vendor models.Vendor
+	result := h.GormDB.Where("LOWER(name) = LOWER(?) OR LOWER(normalized_name) = LOWER(?)", name, name).First(&vendor)
+	if result.Error != nil {
+		c.JSON(http.StatusOK, gin.H{"found": false, "name": name})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"found":  true,
+		"vendor": vendorToResponse(&vendor),
+	})
 }

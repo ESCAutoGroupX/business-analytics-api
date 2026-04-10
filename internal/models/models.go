@@ -110,6 +110,13 @@ type Vendor struct {
 	IsCogsVendor      *bool           `gorm:"column:is_cogs_vendor" json:"is_cogs_vendor"`
 	IsStatementVendor *bool           `gorm:"column:is_statement_vendor" json:"is_statement_vendor"`
 	GLCodeID          *string         `gorm:"column:gl_code_id" json:"gl_code_id"`
+	NormalizedName    *string         `gorm:"column:normalized_name" json:"normalized_name"`
+	BillingFrequency  *string         `gorm:"column:billing_frequency" json:"billing_frequency"`
+	PaymentTerms      *string         `gorm:"column:payment_terms" json:"payment_terms"`
+	TypicalPOPrefix   *string         `gorm:"column:typical_po_prefix" json:"typical_po_prefix"`
+	StatementDueDay   *int            `gorm:"column:statement_due_day" json:"statement_due_day"`
+	AlertDaysBefore   *int            `gorm:"column:alert_days_before;default:2" json:"alert_days_before"`
+	Notes             *string         `gorm:"column:notes" json:"notes"`
 	CreatedAt         time.Time       `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt         time.Time       `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 	GLCode            *ChartOfAccount `gorm:"foreignKey:GLCodeID;references:ID" json:"gl_code,omitempty"`

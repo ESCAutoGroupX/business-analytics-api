@@ -40,6 +40,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	tekmetricHandler := &handlers.TekmetricHandler{GormDB: gormDB, Cfg: cfg}
 	dashboardHandler := &handlers.DashboardHandler{GormDB: gormDB, Cfg: cfg}
 	documentHandler := &handlers.DocumentHandler{GormDB: gormDB, Cfg: cfg}
+	apHandler := &handlers.APHandler{GormDB: gormDB}
+	apHandler.AutoMigrate()
 	notificationHandler := &handlers.NotificationHandler{
 		Email: &notifications.EmailSender{GormDB: gormDB, Cfg: cfg},
 	}
@@ -108,6 +110,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		{
 			vendors.POST("/", vendorHandler.CreateVendor)
 			vendors.GET("/", vendorHandler.ListVendors)
+			vendors.GET("/lookup", vendorHandler.LookupVendor)
 			vendors.GET("/:vendor_id", vendorHandler.GetVendor)
 			vendors.PATCH("/:vendor_id", vendorHandler.PatchVendor)
 			vendors.DELETE("/:vendor_id", vendorHandler.DeleteVendor)
@@ -336,6 +339,16 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			docs.POST("/:id/reprocess", documentHandler.Reprocess)
 			docs.POST("/:id/record-payment", documentHandler.RecordPayment)
 			docs.GET("/:id/file", documentHandler.ServeFile)
+		}
+
+		// Accounts Payable
+		ap := protected.Group("/ap")
+		{
+			ap.GET("/", apHandler.ListEntries)
+			ap.GET("/aging", apHandler.AgingReport)
+			ap.GET("/:id", apHandler.GetEntry)
+			ap.POST("/:id/authorize", apHandler.Authorize)
+			ap.POST("/:id/mark-paid", apHandler.MarkPaid)
 		}
 
 		// Settings / Integrations
