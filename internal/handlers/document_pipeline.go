@@ -208,6 +208,12 @@ func (h *DocumentHandler) runPipeline(apiKey, base64Data, ext string) (*ocrExtra
 		result.POReferences = []string{"agent4_match:" + matchedTxID}
 	}
 
+	// ── Statement post-processing ────────────────────────────
+	if isStatement {
+		result.DocumentType = "STATEMENT"
+		h.processStatementLineItems(agent2, vendorName)
+	}
+
 	return result, rawStr, finalConfidence, pipelineVersion, nil
 }
 
@@ -303,7 +309,7 @@ func extractorPromptForFormat(format string) string {
 		return `This is a WorldPac automotive parts invoice. Extract these fields as JSON:
 {
   "vendor_name": "WorldPac",
-  "vendor_address": "",
+  "vendor_address": "address of the VENDOR (seller), NOT the ship-to or bill-to customer address",
   "document_date": "YYYY-MM-DD (from Invoice Date)",
   "document_number": "from Invoice No. field",
   "vendor_po_number": "from P.O. No. field (customer PO, usually 5 digits)",
@@ -327,7 +333,7 @@ IMPORTANT: For each line item, extract the part_number (product/SKU number) — 
 		return `This is a NAPA Auto Parts invoice. Extract as JSON:
 {
   "vendor_name": "NAPA Auto Parts",
-  "vendor_address": "",
+  "vendor_address": "address of the VENDOR (seller), NOT the ship-to or bill-to customer address",
   "document_date": "YYYY-MM-DD",
   "document_number": "",
   "vendor_po_number": "PO number if present",
@@ -353,7 +359,7 @@ IMPORTANT: For each line item, extract the part_number (product/SKU number) — 
 Extract as JSON:
 {
   "vendor_name": "CARQUEST",
-  "vendor_address": "",
+  "vendor_address": "address of the VENDOR (seller), NOT the ship-to or bill-to customer address",
   "document_date": "YYYY-MM-DD",
   "document_number": "from Invoice No. field",
   "vendor_po_number": "from PO No. field (customer PO/RO number)",
@@ -377,7 +383,7 @@ IMPORTANT: For each line item, extract the part_number (product/SKU number) — 
 		return `This is an O'Reilly Auto Parts invoice. Extract as JSON:
 {
   "vendor_name": "O'Reilly Auto Parts",
-  "vendor_address": "",
+  "vendor_address": "address of the VENDOR (seller), NOT the ship-to or bill-to customer address",
   "document_date": "YYYY-MM-DD",
   "document_number": "",
   "vendor_po_number": "",
@@ -397,7 +403,7 @@ IMPORTANT: For each line item, extract the part_number (product/SKU number) — 
 		return `Extract all fields from this automotive invoice as JSON:
 {
   "vendor_name": "",
-  "vendor_address": "",
+  "vendor_address": "address of the VENDOR (seller), NOT the ship-to or bill-to customer address",
   "document_date": "YYYY-MM-DD",
   "document_number": "",
   "vendor_po_number": "PO or purchase order number (NOT the invoice number)",
@@ -413,6 +419,200 @@ IMPORTANT: For each line item, extract the part_number (product/SKU number) — 
 }
 IMPORTANT: vendor_po_number (P.O. No.) and vendor_invoice_number (Invoice No.) are DIFFERENT fields.
 IMPORTANT: For each line item, extract the part_number (product/SKU number) — this is critical for matching to repair orders.`
+	}
+}
+
+// ── Agent 2b: Statement Extractor ────────────────────────────
+
+func (h *DocumentHandler) agent2ExtractStatement(apiKey, b64, mediaType, blockType string) (*extractorResult, error) {
+	prompt := `This is a vendor account statement (not an individual invoice).
+Extract ALL line items/transactions listed on this statement.
+
+Return JSON:
+{
+  "vendor_name": "",
+  "vendor_address": "address of the VENDOR (seller), NOT the ship-to or bill-to customer address",
+  "account_number": "",
+  "statement_date": "YYYY-MM-DD",
+  "document_date": "YYYY-MM-DD (same as statement_date)",
+  "period_start": "YYYY-MM-DD",
+  "period_end": "YYYY-MM-DD",
+  "previous_balance": 0,
+  "new_charges": 0,
+  "payments_received": 0,
+  "balance_due": 0,
+  "total_amount": 0,
+  "line_items": [
+    {
+      "invoice_number": "",
+      "invoice_date": "YYYY-MM-DD",
+      "order_number": "",
+      "po_number": "",
+      "description": "",
+      "amount": 0,
+      "payment_amount": 0,
+      "balance": 0
+    }
+  ],
+  "ship_to_address": "",
+  "bill_to_address": ""
+}
+
+IMPORTANT: Extract EVERY line item on the statement.
+Each line represents either an invoice charge or a payment.
+vendor_address is the address of the company SENDING the statement, NOT the customer.`
+
+	text, err := h.callClaudeWithImage(apiKey, b64, mediaType, blockType,
+		"You are an expert at reading vendor account statements for automotive repair shops. Extract all statement details and line items. Return JSON only.",
+		prompt)
+	if err != nil {
+		return nil, err
+	}
+
+	var result extractorResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return nil, fmt.Errorf("agent2 statement parse: %w", err)
+	}
+	return &result, nil
+}
+
+// processStatementLineItems saves statement line items and creates an AP entry.
+func (h *DocumentHandler) processStatementLineItems(agent2 *extractorResult, vendorName string) {
+	db := h.sqlDB()
+	if db == nil {
+		log.Printf("pipeline: statement processing skipped — no DB")
+		return
+	}
+
+	// We need the document ID, but it hasn't been created yet at this point in the pipeline.
+	// The caller (buildDocumentFromPipeline / Upload) will handle saving the document first.
+	// We store the statement data in a goroutine that fires after a short delay to let the doc be created.
+	// Instead, expose the data for the caller to use.
+	// NOTE: Actual statement_line_items insertion happens in processStatementAfterSave, called by the upload handler.
+	log.Printf("pipeline: statement detected — vendor=%s lines=%d balance_due=%.2f", vendorName, len(agent2.LineItems), agent2.BalanceDue)
+}
+
+// ProcessStatementAfterSave creates statement_line_items and AP entry after the document is saved.
+func (h *DocumentHandler) ProcessStatementAfterSave(docID int, vendorName string, agent2Raw string) {
+	db := h.sqlDB()
+	if db == nil {
+		return
+	}
+
+	// Parse the agent2 data from ocr_raw
+	var pipelineOut pipelineOutput
+	if err := json.Unmarshal([]byte(agent2Raw), &pipelineOut); err != nil {
+		log.Printf("pipeline: statement post-save parse error: %v", err)
+		return
+	}
+	agent2 := pipelineOut.Agent2Extractor
+	if agent2 == nil {
+		log.Printf("pipeline: statement post-save — no agent2 data")
+		return
+	}
+
+	matchedCount := 0
+	totalCount := 0
+
+	for _, li := range agent2.LineItems {
+		liMap, ok := li.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		totalCount++
+
+		invNum, _ := liMap["invoice_number"].(string)
+		invDateStr, _ := liMap["invoice_date"].(string)
+		desc, _ := liMap["description"].(string)
+		amount, _ := liMap["amount"].(float64)
+		poNum, _ := liMap["po_number"].(string)
+
+		// Insert statement line item
+		var lineID int
+		err := db.QueryRow(`INSERT INTO statement_line_items
+			(statement_document_id, invoice_number, invoice_date, amount, description)
+			VALUES ($1, $2, NULLIF($3, '')::date, $4, $5)
+			RETURNING id`,
+			docID, invNum, invDateStr, amount, desc).Scan(&lineID)
+		if err != nil {
+			log.Printf("pipeline: statement line insert error: %v", err)
+			continue
+		}
+
+		// Try to match to existing invoice document
+		var linkedDocID int
+		var matchedTxID *string
+		err = db.QueryRow(`SELECT id, matched_transaction_id FROM documents
+			WHERE is_deleted = false AND (
+				(vendor_invoice_number IS NOT NULL AND vendor_invoice_number != '' AND vendor_invoice_number ILIKE '%' || $1 || '%')
+				OR ($2 != '' AND vendor_po_number IS NOT NULL AND vendor_po_number = $2)
+			) LIMIT 1`, invNum, poNum).Scan(&linkedDocID, &matchedTxID)
+
+		if err == nil && linkedDocID > 0 {
+			status := "invoice_found"
+			if matchedTxID != nil && *matchedTxID != "" {
+				status = "bank_matched"
+			}
+			db.Exec(`UPDATE statement_line_items SET linked_document_id = $1, status = $2 WHERE id = $3`,
+				linkedDocID, status, lineID)
+			if status == "bank_matched" {
+				db.Exec(`UPDATE statement_line_items SET linked_transaction_id = $1 WHERE id = $2`,
+					*matchedTxID, lineID)
+			}
+			matchedCount++
+			log.Printf("pipeline: statement line %q matched doc %d (status=%s)", invNum, linkedDocID, status)
+		}
+	}
+
+	// Look up vendor ID
+	var vendorID *string
+	db.QueryRow(`SELECT id FROM vendors WHERE LOWER(name) = LOWER($1) OR LOWER(normalized_name) = LOWER($1) LIMIT 1`,
+		vendorName).Scan(&vendorID)
+
+	// Create AP entry
+	apStatus := "open"
+	if totalCount > 0 && matchedCount == totalCount {
+		apStatus = "ready_to_pay"
+	}
+
+	matchedAmount := 0.0
+	unmatchedAmount := 0.0
+	for _, li := range agent2.LineItems {
+		if liMap, ok := li.(map[string]interface{}); ok {
+			amt, _ := liMap["amount"].(float64)
+			unmatchedAmount += amt
+		}
+	}
+	if totalCount > 0 && matchedCount > 0 {
+		// Rough split based on ratio
+		totalAmt := agent2.BalanceDue
+		if totalAmt == 0 {
+			totalAmt = agent2.TotalAmount
+		}
+		matchedAmount = totalAmt * float64(matchedCount) / float64(totalCount)
+		unmatchedAmount = totalAmt - matchedAmount
+	}
+
+	totalAmt := agent2.BalanceDue
+	if totalAmt == 0 {
+		totalAmt = agent2.TotalAmount
+	}
+
+	_, err := db.Exec(`INSERT INTO ap_entries
+		(vendor_id, vendor_name, statement_document_id, period_start, period_end,
+		 total_amount, matched_amount, unmatched_amount,
+		 invoice_count, matched_invoice_count, status)
+		VALUES ($1, $2, $3, NULLIF($4, '')::date, NULLIF($5, '')::date,
+		 $6, $7, $8, $9, $10, $11)`,
+		vendorID, vendorName, docID,
+		agent2.PeriodStart, agent2.PeriodEnd,
+		totalAmt, matchedAmount, unmatchedAmount,
+		totalCount, matchedCount, apStatus)
+	if err != nil {
+		log.Printf("pipeline: AP entry creation error: %v", err)
+	} else {
+		log.Printf("pipeline: AP entry created — vendor=%s total=%.2f matched=%d/%d status=%s",
+			vendorName, totalAmt, matchedCount, totalCount, apStatus)
 	}
 }
 

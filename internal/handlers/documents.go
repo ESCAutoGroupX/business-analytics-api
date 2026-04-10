@@ -146,6 +146,11 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 
 	go h.forwardToWickedFile(&doc, fileBytes)
 
+	// Statement post-processing: create statement_line_items and AP entry
+	if ocrResult.DocumentType == "STATEMENT" && ocrRaw != "" {
+		go h.ProcessStatementAfterSave(doc.ID, ocrResult.VendorName, ocrRaw)
+	}
+
 	c.JSON(http.StatusOK, gin.H{"document": doc})
 }
 
