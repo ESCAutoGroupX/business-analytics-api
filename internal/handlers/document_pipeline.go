@@ -258,7 +258,7 @@ func (h *DocumentHandler) agent2Extract(apiKey, b64, mediaType, blockType, forma
 	prompt := extractorPromptForFormat(format)
 
 	text, err := h.callClaudeWithImage(apiKey, b64, mediaType, blockType,
-		"You are an expert at reading automotive industry invoices. Extract all fields precisely. Return JSON only.",
+		"You are an expert at reading automotive industry invoices. Extract all fields precisely. For each line item, extract the part_number (product/SKU number) — this is critical for matching to repair orders. Return JSON only.",
 		prompt)
 	if err != nil {
 		return nil, err
@@ -294,7 +294,8 @@ func extractorPromptForFormat(format string) string {
   "ship_to_address": "",
   "sales_person": ""
 }
-P.O. No. and Invoice No. are DIFFERENT fields. Do not confuse them.`
+P.O. No. and Invoice No. are DIFFERENT fields. Do not confuse them.
+IMPORTANT: For each line item, extract the part_number (product/SKU number) — this is critical for matching to repair orders.`
 
 	case "NAPA":
 		return `This is a NAPA Auto Parts invoice. Extract as JSON:
@@ -381,7 +382,8 @@ IMPORTANT: vendor_name MUST be "CARQUEST" — do NOT use the dealer/customer nam
   "ship_to_address": "",
   "bill_to_address": ""
 }
-IMPORTANT: vendor_po_number (P.O. No.) and vendor_invoice_number (Invoice No.) are DIFFERENT fields.`
+IMPORTANT: vendor_po_number (P.O. No.) and vendor_invoice_number (Invoice No.) are DIFFERENT fields.
+IMPORTANT: For each line item, extract the part_number (product/SKU number) — this is critical for matching to repair orders.`
 	}
 }
 

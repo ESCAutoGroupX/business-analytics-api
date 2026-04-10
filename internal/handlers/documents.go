@@ -40,16 +40,15 @@ func (h *DocumentHandler) sqlDB() *sql.DB {
 
 // shopAddresses maps location codes to address fragments for matching.
 var shopAddresses = map[string][]string{
-	"ALP": {"865 Owens Lake", "Alpharetta", "30004"},
-	"CED": {"Cedar Springs", "Dallas"},
-	"DUL": {"Duluth"},
-	"HIG": {"Highlands"},
-	"HOU": {"Houston"},
-	"PIE": {"Piedmont"},
-	"PRE": {"Preston Road", "Dallas"},
-	"ROS": {"Roswell"},
+	"ROS": {"Roswell Rd", "4400 Roswell", "Roswell GA", "Roswell"},
 	"SAN": {"Sandy Springs"},
-	"TRA": {"Tracy"},
+	"DUL": {"Duluth"},
+	"ALP": {"Alpharetta", "Owens Lake", "865 Owens Lake", "30004"},
+	"PRE": {"Preston Rd", "Preston Road", "Dallas TX"},
+	"HOU": {"Houston TX", "Houston"},
+	"TRA": {"Tracy", "Tracy St"},
+	"CED": {"Cedar Springs", "Dallas TX"},
+	"HIG": {"Highlands", "Smyrna"},
 }
 
 // ── POST /documents/upload ────────────────────────────────────
