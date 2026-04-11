@@ -451,7 +451,9 @@ func (h *DocumentHandler) List(c *gin.Context) {
 	}
 	if search := c.Query("search"); search != "" {
 		like := "%" + search + "%"
-		query = query.Where("vendor_name ILIKE ? OR vendor_po_number ILIKE ? OR vendor_invoice_number ILIKE ? OR po_number ILIKE ?", like, like, like, like)
+		query = query.Where(`vendor_name ILIKE ? OR vendor_po_number ILIKE ? OR vendor_invoice_number ILIKE ? OR po_number ILIKE ?
+			OR vendor_name IN (SELECT name FROM vendors WHERE parent_brand ILIKE ? OR franchise_network ILIKE ?)`,
+			like, like, like, like, like, like)
 	}
 
 	// Count total
@@ -592,15 +594,28 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 					log.Printf("Vendor correction learned: '%s' → '%s' (count: %d)", oldName, newName, count)
 				}
 
+				// Check if the corrected vendor has a parent brand
+				var parentBrand *string
+				db.QueryRow(`SELECT parent_brand FROM vendors WHERE LOWER(name) = LOWER($1) OR LOWER(normalized_name) = LOWER($1) LIMIT 1`,
+					newName).Scan(&parentBrand)
+
 				// Background Claude call to learn the correction
 				apiKey := h.Cfg.AnthropicAPIKey
-				go func(oldN, newN, key string) {
+				pbStr := ""
+				if parentBrand != nil {
+					pbStr = *parentBrand
+				}
+				go func(oldN, newN, key, pb string) {
+					brandCtx := ""
+					if pb != "" {
+						brandCtx = fmt.Sprintf(" Note: '%s' is part of the '%s' franchise/brand network. Invoices may appear under either name.", newN, pb)
+					}
 					prompt := fmt.Sprintf(
 						"A user corrected vendor name from '%s' to '%s'. "+
 							"This is likely because the logo/header of their invoice was partially obscured or misread. "+
-							"Update the classifier knowledge: when you see '%s' in future, the correct vendor is '%s'. "+
+							"Update the classifier knowledge: when you see '%s' in future, the correct vendor is '%s'.%s "+
 							"Return JSON: {\"alias_confirmed\": true, \"notes\": \"string (any observations about why this happens)\"}",
-						oldN, newN, oldN, newN)
+						oldN, newN, oldN, newN, brandCtx)
 					resp, err := h.callClaudeText(key,
 						"You are a document classification learning system. A user has corrected a vendor name. Acknowledge and return JSON only.",
 						prompt)
@@ -609,7 +624,7 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 					} else {
 						log.Printf("vendor correction Claude response: %s", resp)
 					}
-				}(oldName, newName, apiKey)
+				}(oldName, newName, apiKey, pbStr)
 			}
 		}
 	}

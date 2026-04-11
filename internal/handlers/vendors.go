@@ -30,6 +30,8 @@ type vendorCreateRequest struct {
 	BillingFrequency  *string `json:"billing_frequency"`
 	PaymentTerms      *string `json:"payment_terms"`
 	TypicalPOPrefix   *string `json:"typical_po_prefix"`
+	ParentBrand       *string `json:"parent_brand"`
+	FranchiseNetwork  *string `json:"franchise_network"`
 }
 
 type vendorUpdateRequest struct {
@@ -47,6 +49,8 @@ type vendorUpdateRequest struct {
 	StatementDueDay   *int    `json:"statement_due_day"`
 	AlertDaysBefore   *int    `json:"alert_days_before"`
 	Notes             *string `json:"notes"`
+	ParentBrand       *string `json:"parent_brand"`
+	FranchiseNetwork  *string `json:"franchise_network"`
 }
 
 type vendorResponse struct {
@@ -65,6 +69,8 @@ type vendorResponse struct {
 	StatementDueDay   *int        `json:"statement_due_day"`
 	AlertDaysBefore   *int        `json:"alert_days_before"`
 	Notes             *string     `json:"notes"`
+	ParentBrand       *string     `json:"parent_brand"`
+	FranchiseNetwork  *string     `json:"franchise_network"`
 	GLCodeID          *string     `json:"gl_code_id"`
 	CreatedAt         *time.Time  `json:"created_at"`
 	UpdatedAt         *time.Time  `json:"updated_at"`
@@ -87,6 +93,8 @@ func vendorToResponse(v *models.Vendor) vendorResponse {
 		StatementDueDay:   v.StatementDueDay,
 		AlertDaysBefore:   v.AlertDaysBefore,
 		Notes:             v.Notes,
+		ParentBrand:       v.ParentBrand,
+		FranchiseNetwork:  v.FranchiseNetwork,
 		GLCodeID:          v.GLCodeID,
 		CreatedAt:         &v.CreatedAt,
 		UpdatedAt:         &v.UpdatedAt,
@@ -133,6 +141,8 @@ func (h *VendorHandler) CreateVendor(c *gin.Context) {
 		BillingFrequency:  req.BillingFrequency,
 		PaymentTerms:      req.PaymentTerms,
 		TypicalPOPrefix:   req.TypicalPOPrefix,
+		ParentBrand:       req.ParentBrand,
+		FranchiseNetwork:  req.FranchiseNetwork,
 	}
 
 	if err := h.GormDB.Create(&vendor).Error; err != nil {
@@ -222,6 +232,12 @@ func (h *VendorHandler) PatchVendor(c *gin.Context) {
 	}
 	if req.Notes != nil {
 		updates["notes"] = *req.Notes
+	}
+	if req.ParentBrand != nil {
+		updates["parent_brand"] = *req.ParentBrand
+	}
+	if req.FranchiseNetwork != nil {
+		updates["franchise_network"] = *req.FranchiseNetwork
 	}
 	if req.Name != nil {
 		normalized := strings.ToLower(strings.TrimSpace(*req.Name))

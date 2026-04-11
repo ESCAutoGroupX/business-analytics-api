@@ -117,6 +117,8 @@ type Vendor struct {
 	StatementDueDay   *int            `gorm:"column:statement_due_day" json:"statement_due_day"`
 	AlertDaysBefore   *int            `gorm:"column:alert_days_before;default:2" json:"alert_days_before"`
 	Notes             *string         `gorm:"column:notes" json:"notes"`
+	ParentBrand       *string         `gorm:"column:parent_brand" json:"parent_brand"`
+	FranchiseNetwork  *string         `gorm:"column:franchise_network" json:"franchise_network"`
 	CreatedAt         time.Time       `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt         time.Time       `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 	GLCode            *ChartOfAccount `gorm:"foreignKey:GLCodeID;references:ID" json:"gl_code,omitempty"`

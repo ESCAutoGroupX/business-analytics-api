@@ -539,14 +539,28 @@ func (h *DocumentHandler) ProcessStatementAfterSave(docID int, vendorName string
 			continue
 		}
 
-		// Try to match to existing invoice document
+		// Try to match to existing invoice document (including across parent brand related vendors)
 		var linkedDocID int
 		var matchedTxID *string
 		err = db.QueryRow(`SELECT id, matched_transaction_id FROM documents
 			WHERE is_deleted = false AND (
 				(vendor_invoice_number IS NOT NULL AND vendor_invoice_number != '' AND vendor_invoice_number ILIKE '%' || $1 || '%')
 				OR ($2 != '' AND vendor_po_number IS NOT NULL AND vendor_po_number = $2)
-			) LIMIT 1`, invNum, poNum).Scan(&linkedDocID, &matchedTxID)
+			)
+			AND (
+				vendor_name ILIKE '%' || $3 || '%'
+				OR vendor_name IN (
+					SELECT name FROM vendors
+					WHERE parent_brand IS NOT NULL
+					AND parent_brand = (
+						SELECT parent_brand FROM vendors
+						WHERE normalized_name = LOWER($3)
+						AND parent_brand IS NOT NULL
+						LIMIT 1
+					)
+				)
+			)
+			LIMIT 1`, invNum, poNum, vendorName).Scan(&linkedDocID, &matchedTxID)
 
 		if err == nil && linkedDocID > 0 {
 			status := "invoice_found"
@@ -564,10 +578,15 @@ func (h *DocumentHandler) ProcessStatementAfterSave(docID int, vendorName string
 		}
 	}
 
-	// Look up vendor ID
+	// Look up vendor ID (also check parent brand / franchise network)
 	var vendorID *string
 	db.QueryRow(`SELECT id FROM vendors WHERE LOWER(name) = LOWER($1) OR LOWER(normalized_name) = LOWER($1) LIMIT 1`,
 		vendorName).Scan(&vendorID)
+	if vendorID == nil {
+		// Try matching by parent brand or franchise network
+		db.QueryRow(`SELECT id FROM vendors WHERE parent_brand ILIKE $1 OR franchise_network ILIKE $1 LIMIT 1`,
+			vendorName).Scan(&vendorID)
+	}
 
 	// Create AP entry
 	apStatus := "open"
