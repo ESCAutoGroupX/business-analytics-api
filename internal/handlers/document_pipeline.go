@@ -551,11 +551,9 @@ func (h *DocumentHandler) ProcessStatementAfterSave(docID int, vendorName string
 				vendor_name ILIKE '%' || $3 || '%'
 				OR vendor_name IN (
 					SELECT name FROM vendors
-					WHERE parent_brand IS NOT NULL
-					AND parent_brand = (
+					WHERE parent_brand IS NOT NULL AND parent_brand != '' AND parent_brand = (
 						SELECT parent_brand FROM vendors
-						WHERE normalized_name = LOWER($3)
-						AND parent_brand IS NOT NULL
+						WHERE LOWER(name) = LOWER($3) OR LOWER(normalized_name) = LOWER($3)
 						LIMIT 1
 					)
 				)
