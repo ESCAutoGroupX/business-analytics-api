@@ -119,6 +119,8 @@ type Vendor struct {
 	Notes             *string         `gorm:"column:notes" json:"notes"`
 	ParentBrand       *string         `gorm:"column:parent_brand" json:"parent_brand"`
 	FranchiseNetwork  *string         `gorm:"column:franchise_network" json:"franchise_network"`
+	PaymentBehavior   *string         `gorm:"column:payment_behavior;default:SINGLE_PAYMENT" json:"payment_behavior"`
+	PaymentCycleDays  *int            `gorm:"column:payment_cycle_days;default:30" json:"payment_cycle_days"`
 	CreatedAt         time.Time       `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt         time.Time       `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 	GLCode            *ChartOfAccount `gorm:"foreignKey:GLCodeID;references:ID" json:"gl_code,omitempty"`
@@ -829,7 +831,8 @@ type Document struct {
 	VendorPONumber       *string   `gorm:"column:vendor_po_number" json:"vendor_po_number"`
 	VendorInvoiceNumber  *string   `gorm:"column:vendor_invoice_number" json:"vendor_invoice_number"`
 	OrderNumber          *string   `gorm:"column:order_number" json:"order_number"`
-	MatchedTransactionID *string   `gorm:"column:matched_transaction_id" json:"matched_transaction_id"`
+	MatchedTransactionID  *string   `gorm:"column:matched_transaction_id" json:"matched_transaction_id"`
+	MatchedTransactionIDs *string  `gorm:"column:matched_transaction_ids;type:jsonb" json:"matched_transaction_ids"`
 	MatchedXeroInvoiceID *int      `gorm:"column:matched_xero_invoice_id" json:"matched_xero_invoice_id"`
 	OCRRaw               *string   `gorm:"column:ocr_raw" json:"-"`
 	OCRConfidence        *float64  `gorm:"column:ocr_confidence" json:"ocr_confidence"`

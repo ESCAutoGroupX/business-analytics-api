@@ -32,6 +32,8 @@ type vendorCreateRequest struct {
 	TypicalPOPrefix   *string `json:"typical_po_prefix"`
 	ParentBrand       *string `json:"parent_brand"`
 	FranchiseNetwork  *string `json:"franchise_network"`
+	PaymentBehavior   *string `json:"payment_behavior"`
+	PaymentCycleDays  *int    `json:"payment_cycle_days"`
 }
 
 type vendorUpdateRequest struct {
@@ -51,6 +53,8 @@ type vendorUpdateRequest struct {
 	Notes             *string `json:"notes"`
 	ParentBrand       *string `json:"parent_brand"`
 	FranchiseNetwork  *string `json:"franchise_network"`
+	PaymentBehavior   *string `json:"payment_behavior"`
+	PaymentCycleDays  *int    `json:"payment_cycle_days"`
 }
 
 type vendorResponse struct {
@@ -71,6 +75,8 @@ type vendorResponse struct {
 	Notes             *string     `json:"notes"`
 	ParentBrand       *string     `json:"parent_brand"`
 	FranchiseNetwork  *string     `json:"franchise_network"`
+	PaymentBehavior   *string     `json:"payment_behavior"`
+	PaymentCycleDays  *int        `json:"payment_cycle_days"`
 	GLCodeID          *string     `json:"gl_code_id"`
 	CreatedAt         *time.Time  `json:"created_at"`
 	UpdatedAt         *time.Time  `json:"updated_at"`
@@ -95,6 +101,8 @@ func vendorToResponse(v *models.Vendor) vendorResponse {
 		Notes:             v.Notes,
 		ParentBrand:       v.ParentBrand,
 		FranchiseNetwork:  v.FranchiseNetwork,
+		PaymentBehavior:   v.PaymentBehavior,
+		PaymentCycleDays:  v.PaymentCycleDays,
 		GLCodeID:          v.GLCodeID,
 		CreatedAt:         &v.CreatedAt,
 		UpdatedAt:         &v.UpdatedAt,
@@ -143,6 +151,8 @@ func (h *VendorHandler) CreateVendor(c *gin.Context) {
 		TypicalPOPrefix:   req.TypicalPOPrefix,
 		ParentBrand:       req.ParentBrand,
 		FranchiseNetwork:  req.FranchiseNetwork,
+		PaymentBehavior:   req.PaymentBehavior,
+		PaymentCycleDays:  req.PaymentCycleDays,
 	}
 
 	if err := h.GormDB.Create(&vendor).Error; err != nil {
@@ -238,6 +248,12 @@ func (h *VendorHandler) PatchVendor(c *gin.Context) {
 	}
 	if req.FranchiseNetwork != nil {
 		updates["franchise_network"] = *req.FranchiseNetwork
+	}
+	if req.PaymentBehavior != nil {
+		updates["payment_behavior"] = *req.PaymentBehavior
+	}
+	if req.PaymentCycleDays != nil {
+		updates["payment_cycle_days"] = *req.PaymentCycleDays
 	}
 	if req.Name != nil {
 		normalized := strings.ToLower(strings.TrimSpace(*req.Name))
