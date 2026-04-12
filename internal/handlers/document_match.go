@@ -83,7 +83,7 @@ type unmatchedDocEntry struct {
 
 // GetDocumentStatus returns the document match status for a transaction.
 func (h *DocumentMatchHandler) GetDocumentStatus(c *gin.Context) {
-	txnID := c.Param("id")
+	txnID := c.Param("transaction_id")
 
 	var txn models.Transaction
 	if err := h.GormDB.Where("id = ?", txnID).First(&txn).Error; err != nil {
@@ -122,7 +122,7 @@ func (h *DocumentMatchHandler) GetDocumentStatus(c *gin.Context) {
 
 // SetDocumentMatch handles manual match, unmatch, and explicit_unmatch actions.
 func (h *DocumentMatchHandler) SetDocumentMatch(c *gin.Context) {
-	txnID := c.Param("id")
+	txnID := c.Param("transaction_id")
 
 	var req docMatchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

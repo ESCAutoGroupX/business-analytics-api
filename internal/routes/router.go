@@ -382,8 +382,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		}
 
 		// Document Matching
-		protected.GET("/transactions/:id/document-status", docMatchHandler.GetDocumentStatus)
-		protected.POST("/transactions/:id/document-match", docMatchHandler.MatchDocument)
+		protected.GET("/transactions/:transaction_id/document-status", docMatchHandler.GetDocumentStatus)
+		protected.POST("/transactions/:transaction_id/document-match", docMatchHandler.MatchDocument)
 		protected.GET("/documents/unmatched-bucket", docMatchHandler.UnmatchedBucket)
 
 		// Settings / Integrations
