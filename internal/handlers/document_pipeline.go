@@ -25,6 +25,9 @@ type classifierResult struct {
 	DocumentType   string  `json:"document_type"`
 	DocumentFormat string  `json:"document_format"`
 	Confidence     float64 `json:"confidence"`
+	IsFinancial    bool    `json:"is_financial"`
+	RONumber       string  `json:"ro_number,omitempty"`
+	CustomerName   string  `json:"customer_name,omitempty"`
 }
 
 type extractorResult struct {
@@ -96,7 +99,15 @@ func (h *DocumentHandler) runPipeline(apiKey, base64Data, ext string) (*ocrExtra
 		return h.fallbackSingleAgent(apiKey, base64Data, ext)
 	}
 	output.Agent1Classifier = agent1
-	log.Printf("pipeline: agent1 done — vendor=%s format=%s confidence=%.2f", agent1.VendorName, agent1.DocumentFormat, agent1.Confidence)
+	log.Printf("pipeline: agent1 done — vendor=%s type=%s format=%s confidence=%.2f financial=%v",
+		agent1.VendorName, agent1.DocumentType, agent1.DocumentFormat, agent1.Confidence, agent1.IsFinancial)
+
+	// ── Non-financial short circuit ──────────────────────────
+	if !agent1.IsFinancial || !isFinancialDocType(agent1.DocumentType) {
+		log.Printf("pipeline: non-financial document detected (%s) — running lightweight extraction", agent1.DocumentType)
+		result, rawStr := h.runNonFinancialPipeline(apiKey, base64Data, mediaType, contentBlockType, agent1)
+		return result, rawStr, agent1.Confidence, "non-financial-v1", nil
+	}
 
 	// ── Agent 2: Vendor-specific extractor ───────────────────
 	isStatement := strings.EqualFold(agent1.DocumentType, "STATEMENT")
@@ -222,26 +233,38 @@ func (h *DocumentHandler) runPipeline(apiKey, base64Data, ext string) (*ocrExtra
 func (h *DocumentHandler) agent1Classify(apiKey, b64, mediaType, blockType string) (*classifierResult, error) {
 	prompt := `Classify this document. Return JSON only:
 {
-  "vendor_name": "exact company name",
+  "vendor_name": "exact company name from header/logo",
   "vendor_type": "PARTS|SUPPLIES|OFFICE|TOOLS|UTILITY|OTHER",
-  "document_type": "INVOICE|STATEMENT|RECEIPT|CREDIT_MEMO|OTHER",
+  "document_type": "INVOICE|STATEMENT|RECEIPT|CREDIT_MEMO|SIGNED_RO|CONTRACT|WARRANTY|INSPECTION|INSURANCE|ESTIMATE|UNKNOWN",
   "document_format": "WORLDPAC|NAPA|OREILLY|AUTOZONE|DORMAN|MOTORCRAFT|GATES|CARQUEST|ADVANCE|GENERIC",
-  "confidence": 0.0-1.0
+  "confidence": 0.0-1.0,
+  "is_financial": true,
+  "ro_number": ""
 }
 
-CRITICAL: The vendor is identified ONLY by the large logo/brand name printed at the very TOP of the invoice header.
+DOCUMENT TYPE CLASSIFICATION:
 
-The rule: Who is SENDING/SELLING? That is the vendor.
-Who is RECEIVING/BUYING? That is the customer (ignore this).
+FINANCIAL (full processing pipeline):
+- INVOICE: vendor invoice for parts/supplies
+- STATEMENT: vendor monthly/weekly statement
+- RECEIPT: payment receipt
+- CREDIT_MEMO: vendor credit memo
 
-Do NOT use addresses, account names, ship-to, or bill-to sections from the body of the document.
+NON-FINANCIAL (pass-through, minimal extraction):
+- SIGNED_RO: customer-signed repair order (shows customer signature, vehicle info, RO number)
+- CONTRACT: any contract or agreement
+- WARRANTY: warranty document or claim form
+- INSPECTION: vehicle inspection report
+- INSURANCE: insurance card or claim document
+- ESTIMATE: repair estimate for customer
+- UNKNOWN: cannot classify
 
-For CarQuest invoices:
-- The header shows 'CARQUEST' in large red letters
-- The vendor_name MUST be 'CARQUEST'
-- vendor_format MUST be 'CARQUEST'
-- Any text like 'RSR AUTO PARTS', 'BSR AUTO PARTS' in the body is the DEALER/CUSTOMER name, NOT the vendor
-- CarQuest sends → customer (ESC Auto / RSR Auto) receives. So vendor = CARQUEST, not RSR AUTO PARTS.
+Set is_financial=true for INVOICE, STATEMENT, RECEIPT, CREDIT_MEMO.
+Set is_financial=false for all others.
+If document_type is SIGNED_RO, extract the RO number into ro_number field.
+
+CRITICAL: The vendor is identified ONLY by the large logo/brand name printed at the very TOP of the document header.
+The rule: Who is SENDING/SELLING? That is the vendor. Who is RECEIVING/BUYING? Ignore them.
 
 Common automotive parts vendors:
 - CarQuest logo → vendor_name: "CARQUEST", document_format: "CARQUEST"
@@ -874,4 +897,134 @@ func (h *DocumentHandler) doClaudeRequest(apiKey string, reqBody map[string]inte
 func (h *DocumentHandler) fallbackSingleAgent(apiKey, base64Data, ext string) (*ocrExtractedData, string, float64, string, error) {
 	result, raw, err := h.callClaudeVision(apiKey, base64Data, ext)
 	return result, raw, 0.70, "single-agent-fallback", err
+}
+
+// ── Non-Financial Document Helpers ──────────────────────────────
+
+// isFinancialDocType returns true if the document type is a financial type.
+func isFinancialDocType(docType string) bool {
+	switch strings.ToUpper(docType) {
+	case "INVOICE", "STATEMENT", "RECEIPT", "CREDIT_MEMO":
+		return true
+	default:
+		return false
+	}
+}
+
+// documentTypeFolder returns the WickedFile folder name for a document type.
+func documentTypeFolder(docType string) string {
+	switch strings.ToUpper(docType) {
+	case "SIGNED_RO":
+		return "Signed Repair Orders"
+	case "CONTRACT":
+		return "Contracts"
+	case "WARRANTY":
+		return "Warranty Documents"
+	case "INSPECTION":
+		return "Inspections"
+	case "INSURANCE":
+		return "Insurance"
+	case "ESTIMATE":
+		return "Estimates"
+	default:
+		return "Other Documents"
+	}
+}
+
+// extractWFKeywords extracts WickedFile classification keywords from OCR text.
+func extractWFKeywords(text string) []string {
+	keywords := []string{}
+	textLower := strings.ToLower(text)
+	if strings.Contains(textLower, "core") {
+		keywords = append(keywords, "core")
+	}
+	if strings.Contains(textLower, "rma") || strings.Contains(textLower, "return authorization") {
+		keywords = append(keywords, "rma")
+	}
+	if strings.Contains(textLower, "stock") || strings.Contains(textLower, "stk") {
+		keywords = append(keywords, "stock")
+	}
+	if strings.Contains(textLower, "shop") {
+		keywords = append(keywords, "shop")
+	}
+	if strings.Contains(textLower, "warranty") || strings.Contains(textLower, "warr") {
+		keywords = append(keywords, "warranty")
+	}
+	if strings.Contains(textLower, "office") {
+		keywords = append(keywords, "office")
+	}
+	return keywords
+}
+
+// assignCategoryFromPO assigns a WickedFile category based on PO number patterns.
+func assignCategoryFromPO(poNumber string) string {
+	po := strings.ToLower(poNumber)
+	if strings.HasPrefix(po, "st") || strings.Contains(po, "inventory") || strings.Contains(po, "cogs") {
+		return "inventory"
+	}
+	if strings.HasPrefix(po, "sup") || strings.HasPrefix(po, "sho") || strings.Contains(po, "shop") {
+		return "shop_supplies"
+	}
+	if strings.HasPrefix(po, "off") || strings.Contains(po, "office") {
+		return "office_supplies"
+	}
+	if strings.HasPrefix(po, "inv") {
+		return "parts_cogs"
+	}
+	return "uncategorized"
+}
+
+// runNonFinancialPipeline handles lightweight extraction for non-financial documents.
+func (h *DocumentHandler) runNonFinancialPipeline(apiKey, base64Data, mediaType, contentBlockType string, agent1 *classifierResult) (*ocrExtractedData, string) {
+	// Lightweight extraction — just get key fields
+	prompt := `Extract basic metadata from this non-financial document. Return JSON only:
+{
+  "customer_name": "customer or person name if visible",
+  "vendor_name": "business name if visible",
+  "document_date": "YYYY-MM-DD if visible",
+  "ro_number": "repair order number if visible",
+  "location": "shop/location name or address if visible",
+  "description": "brief one-line description of document contents"
+}`
+
+	text, err := h.callClaudeWithImage(apiKey, base64Data, mediaType, contentBlockType,
+		"Extract basic metadata from this document. Respond with JSON only.", prompt)
+	if err != nil {
+		log.Printf("pipeline: non-financial extraction failed: %v", err)
+		return &ocrExtractedData{
+			DocumentType: agent1.DocumentType,
+			VendorName:   agent1.VendorName,
+		}, "{}"
+	}
+
+	var extracted struct {
+		CustomerName string `json:"customer_name"`
+		VendorName   string `json:"vendor_name"`
+		DocumentDate string `json:"document_date"`
+		RONumber     string `json:"ro_number"`
+		Location     string `json:"location"`
+		Description  string `json:"description"`
+	}
+	json.Unmarshal([]byte(text), &extracted)
+
+	vendorName := extracted.VendorName
+	if vendorName == "" {
+		vendorName = agent1.VendorName
+	}
+
+	result := &ocrExtractedData{
+		DocumentType: agent1.DocumentType,
+		VendorName:   vendorName,
+		DocumentDate: extracted.DocumentDate,
+	}
+
+	// Build raw output
+	output := map[string]interface{}{
+		"pipeline_version": "non-financial-v1",
+		"agent1":           agent1,
+		"extraction":       extracted,
+	}
+	rawJSON, _ := json.Marshal(output)
+
+	return result, string(rawJSON)
 }

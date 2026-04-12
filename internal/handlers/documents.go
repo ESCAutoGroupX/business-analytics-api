@@ -24,6 +24,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/services"
+
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 )
@@ -135,6 +137,55 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 
 	doc := h.buildDocumentFromPipeline(file.Filename, savePath, safeFilename, ocrResult, ocrRaw, confidence, agentVersion, nil, nil)
 
+	// ── Non-financial pass-through ───────────────────────────
+	if !isFinancialDocType(ocrResult.DocumentType) {
+		isFinFalse := false
+		doc.IsFinancial = &isFinFalse
+		doc.Status = "passthrough"
+
+		// Set WickedFile folder metadata
+		dateStr := ""
+		if ocrResult.DocumentDate != "" {
+			dateStr = ocrResult.DocumentDate[:7] // YYYY-MM
+		} else {
+			dateStr = time.Now().Format("2006-01")
+		}
+		locationName := "General"
+		if doc.LocationCode != nil && *doc.LocationCode != "" {
+			locationName = *doc.LocationCode
+		} else if doc.Location != nil && *doc.Location != "" {
+			locationName = *doc.Location
+		}
+		folderPath := fmt.Sprintf("%s/%s/%s", locationName, documentTypeFolder(ocrResult.DocumentType), dateStr)
+		doc.WFolderPath = &folderPath
+
+		// Extract keywords from OCR raw
+		keywords := extractWFKeywords(ocrRaw)
+		if len(keywords) > 0 {
+			kwJSON, _ := json.Marshal(keywords)
+			kwStr := string(kwJSON)
+			doc.WFKeywords = &kwStr
+		}
+
+		category := assignCategoryFromPO("")
+		doc.WFCategory = &category
+
+		if err := h.GormDB.Create(&doc).Error; err != nil {
+			log.Printf("documents: failed to save non-financial document: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to save document"})
+			return
+		}
+
+		go h.forwardToWickedFile(&doc, fileBytes)
+
+		c.JSON(http.StatusOK, gin.H{"document": doc, "passthrough": true})
+		return
+	}
+
+	// ── Financial document — full pipeline ───────────────────
+	isFinTrue := true
+	doc.IsFinancial = &isFinTrue
+
 	if err := h.GormDB.Create(&doc).Error; err != nil {
 		log.Printf("documents: failed to save document: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to save document"})
@@ -145,6 +196,9 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	h.tryAutoMatch(&doc, ocrResult)
 
 	go h.forwardToWickedFile(&doc, fileBytes)
+
+	// Auto-match to transactions
+	go h.matchDocumentToTransactions(&doc)
 
 	// Statement post-processing: create statement_line_items and AP entry
 	if ocrResult.DocumentType == "STATEMENT" && ocrRaw != "" {
@@ -928,6 +982,196 @@ func (h *DocumentHandler) tryAutoMatch(doc *models.Document, ocr *ocrExtractedDa
 	}
 }
 
+// matchDocumentToTransactions attempts to match a document to bank transactions
+// using multi-factor scoring: amount, vendor name, date proximity, parent brand.
+func (h *DocumentHandler) matchDocumentToTransactions(doc *models.Document) {
+	if doc == nil || doc.TotalAmount == nil || doc.VendorName == nil {
+		return
+	}
+
+	vendor := *doc.VendorName
+	amount := *doc.TotalAmount
+	if amount == 0 {
+		return
+	}
+
+	// Look up parent brand for expanded matching
+	parentBrand := ""
+	var vendorRec models.Vendor
+	if err := h.GormDB.Where("LOWER(name) = LOWER(?)", vendor).First(&vendorRec).Error; err == nil {
+		if vendorRec.ParentBrand != nil {
+			parentBrand = *vendorRec.ParentBrand
+		}
+	}
+
+	// Find candidate transactions: amount within 5% + date within 14 days
+	db, _ := h.GormDB.DB()
+	if db == nil {
+		return
+	}
+
+	dateStr := ""
+	if doc.DocumentDate != nil {
+		dateStr = *doc.DocumentDate
+	}
+
+	// Build query — Plaid amounts are negative for debits
+	query := `SELECT id, amount, date, name, merchant_name, vendor FROM transactions
+		WHERE ABS(COALESCE(amount, 0) + $1) < (ABS($1) * 0.05 + 0.01)
+		AND (document_match_status IS NULL OR document_match_status != 'unmatched_explicit')
+		AND matched_document_id IS NULL`
+	args := []interface{}{amount}
+
+	if dateStr != "" {
+		query += ` AND date >= ($2::date - interval '14 days')::text AND date <= ($2::date + interval '14 days')::text`
+		args = append(args, dateStr)
+	}
+	query += ` ORDER BY ABS(COALESCE(amount, 0) + $1) ASC LIMIT 5`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		log.Printf("documents: matchDocToTxns query error: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		ID           string
+		Amount       float64
+		Date         string
+		Name         string
+		MerchantName string
+		Vendor       string
+	}
+
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		var amt, name, mname, vnd, dt sql.NullString
+		var amtF sql.NullFloat64
+		rows.Scan(&c.ID, &amtF, &dt, &name, &mname, &vnd)
+		if amtF.Valid {
+			c.Amount = amtF.Float64
+		}
+		if dt.Valid {
+			c.Date = dt.String
+		}
+		if name.Valid {
+			c.Name = name.String
+		}
+		if mname.Valid {
+			c.MerchantName = mname.String
+		}
+		if vnd.Valid {
+			c.Vendor = vnd.String
+		}
+		_ = amt
+		candidates = append(candidates, c)
+	}
+
+	bestScore := 0
+	bestID := ""
+
+	for _, c := range candidates {
+		score := 0
+
+		// Amount scoring (Plaid amounts are negative for debits)
+		txnAmt := c.Amount
+		if txnAmt < 0 {
+			txnAmt = -txnAmt
+		}
+		diff := math.Abs(txnAmt - amount)
+		if diff < 0.01 {
+			score += 40
+		} else if diff <= amount*0.01 {
+			score += 35
+		} else if diff <= amount*0.05 {
+			score += 25
+		}
+
+		// Vendor matching
+		vendorLower := strings.ToLower(vendor)
+		matched := false
+		for _, field := range []string{c.Name, c.MerchantName, c.Vendor} {
+			if field == "" {
+				continue
+			}
+			fl := strings.ToLower(field)
+			if strings.Contains(fl, vendorLower) || strings.Contains(vendorLower, fl) {
+				score += 35
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			// Check fuzzy match
+			for _, field := range []string{c.Name, c.MerchantName, c.Vendor} {
+				if field == "" {
+					continue
+				}
+				sim := services.StringSimilarity(strings.ToLower(vendor), strings.ToLower(field))
+				if sim >= 0.80 {
+					score += 25
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched && parentBrand != "" {
+			pbLower := strings.ToLower(parentBrand)
+			for _, field := range []string{c.Name, c.MerchantName, c.Vendor} {
+				if field != "" && strings.Contains(strings.ToLower(field), pbLower) {
+					score += 20
+					break
+				}
+			}
+		}
+
+		// Date proximity scoring
+		if dateStr != "" && c.Date != "" {
+			docDate, e1 := time.Parse("2006-01-02", dateStr)
+			txnDate, e2 := time.Parse("2006-01-02", c.Date[:10])
+			if e1 == nil && e2 == nil {
+				daysDiff := int(math.Abs(docDate.Sub(txnDate).Hours() / 24))
+				if daysDiff <= 3 {
+					score += 20
+				} else if daysDiff <= 7 {
+					score += 15
+				} else if daysDiff <= 14 {
+					score += 10
+				}
+			}
+		}
+
+		if score > bestScore {
+			bestScore = score
+			bestID = c.ID
+		}
+	}
+
+	if bestID != "" && bestScore >= 40 {
+		docID := doc.ID
+		status := "matched"
+		if bestScore < 75 {
+			status = "suspect"
+		}
+		h.GormDB.Model(&models.Transaction{}).Where("id = ?", bestID).Updates(map[string]interface{}{
+			"matched_document_id":   docID,
+			"document_match_score":  bestScore,
+			"document_match_status": status,
+		})
+		doc.MatchedTransactionID = &bestID
+		if status == "matched" && doc.Status != "matched" {
+			doc.Status = "matched"
+			h.GormDB.Model(doc).Updates(map[string]interface{}{
+				"matched_transaction_id": bestID,
+				"status":                 "matched",
+			})
+		}
+		log.Printf("documents: auto-matched doc %d to txn %s (score=%d status=%s)", doc.ID, bestID, bestScore, status)
+	}
+}
+
 func (h *DocumentHandler) processMultiInvoicePDF(
 	apiKey, origFilename, origPath, origSafeFilename, ext string,
 	groups []invoiceGroup, origFileBytes []byte,
@@ -1398,6 +1642,21 @@ func (h *DocumentHandler) wickedFileAPISend(doc *models.Document, fileBytes []by
 	}
 	if doc.TotalAmount != nil {
 		meta["total_amount"] = *doc.TotalAmount
+	}
+	if doc.IsFinancial != nil {
+		meta["is_financial"] = *doc.IsFinancial
+	}
+	if doc.WFolderPath != nil {
+		meta["folder_path"] = *doc.WFolderPath
+	}
+	if doc.WFKeywords != nil {
+		meta["keywords"] = *doc.WFKeywords
+	}
+	if doc.WFCategory != nil {
+		meta["category"] = *doc.WFCategory
+	}
+	if doc.CustomerName != nil {
+		meta["customer_name"] = *doc.CustomerName
 	}
 
 	metaJSON, _ := json.Marshal(meta)

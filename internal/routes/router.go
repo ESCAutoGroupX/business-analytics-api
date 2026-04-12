@@ -46,6 +46,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	matchingHandler.AutoMigrate()
 	receivablesHandler := &handlers.ReceivablesHandler{GormDB: gormDB, Cfg: cfg}
 	receivablesHandler.AutoMigrate()
+	docMatchHandler := &handlers.DocumentMatchHandler{GormDB: gormDB}
+	docMatchHandler.AutoMigrate()
 	notificationHandler := &handlers.NotificationHandler{
 		Email: &notifications.EmailSender{GormDB: gormDB, Cfg: cfg},
 	}
@@ -378,6 +380,11 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			credits.GET("/", receivablesHandler.ListCredits)
 			credits.POST("/:id/apply", receivablesHandler.ApplyCredit)
 		}
+
+		// Document Matching
+		protected.GET("/transactions/:id/document-status", docMatchHandler.GetDocumentStatus)
+		protected.POST("/transactions/:id/document-match", docMatchHandler.MatchDocument)
+		protected.GET("/documents/unmatched-bucket", docMatchHandler.UnmatchedBucket)
 
 		// Settings / Integrations
 		settings := protected.Group("/settings")

@@ -202,6 +202,9 @@ type Transaction struct {
 	PaymentMethodID          *string    `gorm:"column:payment_method_id" json:"payment_method_id"`
 	GLCodeID                 *string    `gorm:"column:gl_code_id" json:"gl_code_id"`
 	UserID                   *string    `gorm:"column:user_id" json:"user_id"`
+	MatchedDocumentID        *int       `gorm:"column:matched_document_id" json:"matched_document_id"`
+	DocumentMatchScore       *int       `gorm:"column:document_match_score" json:"document_match_score"`
+	DocumentMatchStatus      *string    `gorm:"column:document_match_status;default:none" json:"document_match_status"`
 	CreatedAt                time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt                time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }
@@ -837,6 +840,11 @@ type Document struct {
 	PageCount            *int       `gorm:"column:page_count" json:"page_count"`
 	PageNumbers          *string    `gorm:"column:page_numbers" json:"page_numbers"`
 	IsDeleted            bool       `gorm:"column:is_deleted;default:false" json:"-"`
+	IsFinancial          *bool      `gorm:"column:is_financial;default:true" json:"is_financial"`
+	CustomerName         *string    `gorm:"column:customer_name" json:"customer_name"`
+	WFolderPath          *string    `gorm:"column:wf_folder_path" json:"wf_folder_path"`
+	WFKeywords           *string    `gorm:"column:wf_keywords;type:jsonb" json:"wf_keywords"`
+	WFCategory           *string    `gorm:"column:wf_category" json:"wf_category"`
 	WickedFileSent       bool       `gorm:"column:wickedfile_sent;default:false" json:"wickedfile_sent"`
 	WickedFileSentAt     *time.Time `gorm:"column:wickedfile_sent_at" json:"wickedfile_sent_at"`
 	CreatedAt            time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
