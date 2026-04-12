@@ -191,9 +191,10 @@ func (h *DocumentMatchHandler) MatchDocumentsToTransactions() {
 	matched := 0
 	suspect := 0
 	for _, doc := range docs {
-		if h.matchSingleDoc(doc) == "matched" {
+		result := h.matchSingleDoc(doc)
+		if result == "matched" {
 			matched++
-		} else if h.matchSingleDoc(doc) == "suspect" {
+		} else if result == "suspect" {
 			suspect++
 		}
 	}
@@ -210,16 +211,11 @@ func (h *DocumentMatchHandler) matchSingleDoc(doc models.Document) string {
 	// Look up vendor config for payment behavior
 	var vendor models.Vendor
 	behavior := "PER_INVOICE"
-	cycleDays := 14
 
 	if vendorName != "" {
-		if err := h.GormDB.Where("LOWER(name) = LOWER(?) OR normalized_name = LOWER(?)",
-			vendorName, vendorName).First(&vendor).Error; err == nil {
+		if err := h.GormDB.Where("LOWER(name) = LOWER(?)", vendorName).First(&vendor).Error; err == nil {
 			if vendor.PaymentBehavior != nil && *vendor.PaymentBehavior != "" {
 				behavior = *vendor.PaymentBehavior
-			}
-			if vendor.PaymentCycleDays != nil && *vendor.PaymentCycleDays > 0 {
-				cycleDays = *vendor.PaymentCycleDays
 			}
 		}
 	}
@@ -231,39 +227,37 @@ func (h *DocumentMatchHandler) matchSingleDoc(doc models.Document) string {
 
 	switch behavior {
 	case "PER_INVOICE":
-		return h.matchPerInvoice(doc, vendorName)
+		return h.matchPerInvoice(doc)
 
 	case "SINGLE_PAYMENT":
 		if docType == "STATEMENT" {
-			return h.matchStatementSinglePayment(doc, vendor, cycleDays)
+			return h.matchStatementSinglePayment(doc, vendor)
 		}
-		// Individual invoice from a statement vendor — try to link to statement
-		if result := h.matchInvoiceToStatement(doc); result != "" {
-			return result
-		}
-		// Fallback to per-invoice match
-		return h.matchPerInvoice(doc, vendorName)
+		return h.matchInvoiceToStatement(doc)
 
 	case "MULTIPLE_PAYMENTS":
 		if docType == "STATEMENT" {
-			return h.matchStatementMultiplePayments(doc, vendor, cycleDays)
+			return h.matchStatementMultiplePayments(doc, vendor)
 		}
-		if result := h.matchInvoiceToStatement(doc); result != "" {
-			return result
-		}
-		return h.matchPerInvoice(doc, vendorName)
+		return h.matchInvoiceToStatement(doc)
 
 	default:
-		return h.matchPerInvoice(doc, vendorName)
+		return h.matchPerInvoice(doc)
 	}
 }
 
-// matchPerInvoice finds a single transaction matching the invoice amount (within 1%).
-func (h *DocumentMatchHandler) matchPerInvoice(doc models.Document, vendorName string) string {
+// matchPerInvoice finds a single transaction matching the invoice amount (within 1%),
+// date (within 14 days), and vendor name. Uses scoreDocToTransaction for scoring.
+// Thresholds: >=75 matched, 40-74 suspect.
+func (h *DocumentMatchHandler) matchPerInvoice(doc models.Document) string {
 	if doc.TotalAmount == nil || *doc.TotalAmount == 0 {
 		return ""
 	}
 	amt := *doc.TotalAmount
+	vendorName := ""
+	if doc.VendorName != nil {
+		vendorName = *doc.VendorName
+	}
 	dateStr := ""
 	if doc.DocumentDate != nil {
 		dateStr = *doc.DocumentDate
@@ -305,65 +299,137 @@ func (h *DocumentMatchHandler) matchPerInvoice(doc models.Document, vendorName s
 }
 
 // matchStatementSinglePayment finds ONE bank transaction matching the statement total.
-// Pattern: WorldPac statement $2,656 → one ACH payment $2,656.
-func (h *DocumentMatchHandler) matchStatementSinglePayment(doc models.Document, vendor models.Vendor, cycleDays int) string {
+// Pattern: WorldPac statement $2,656 -> one ACH payment $2,656.
+// Scoring: amount_exact(+40) + vendor_match(+35) + date_within_cycle(+20) = 95 max.
+func (h *DocumentMatchHandler) matchStatementSinglePayment(doc models.Document, vendor models.Vendor) string {
 	if doc.TotalAmount == nil || *doc.TotalAmount == 0 {
 		return ""
 	}
-	amt := *doc.TotalAmount
+	docAmount := *doc.TotalAmount
 	dateStr := ""
 	if doc.DocumentDate != nil {
 		dateStr = *doc.DocumentDate
 	}
-
-	query := h.GormDB.Model(&models.Transaction{}).
-		Where("(document_match_status IS NULL OR document_match_status = 'none')").
-		Where("ABS(amount - ?) < ? OR ABS(amount + ?) < ?",
-			amt, amt*0.02+0.01, amt, amt*0.02+0.01)
-
-	// Look forward from statement date by cycle days
-	if dateStr != "" {
-		if docDate, err := time.Parse("2006-01-02", dateStr); err == nil {
-			from := docDate.Format("2006-01-02")
-			to := docDate.AddDate(0, 0, cycleDays+7).Format("2006-01-02")
-			query = query.Where("date >= ? AND date <= ?", from, to)
-		}
-	}
-
-	// Match vendor name or parent brand
 	vendorName := ""
 	if doc.VendorName != nil {
 		vendorName = *doc.VendorName
 	}
-	if vendorName != "" {
-		vLike := "%" + strings.ToLower(vendorName) + "%"
-		parentLike := vLike
-		if vendor.ParentBrand != nil && *vendor.ParentBrand != "" {
-			parentLike = "%" + strings.ToLower(*vendor.ParentBrand) + "%"
+
+	// Payment cycle days: default 30 if nil
+	cycleDays := 30
+	if vendor.PaymentCycleDays != nil && *vendor.PaymentCycleDays > 0 {
+		cycleDays = *vendor.PaymentCycleDays
+	}
+
+	// Query transactions within 2% of statement total
+	query := h.GormDB.Model(&models.Transaction{}).
+		Where("(document_match_status IS NULL OR document_match_status = 'none')").
+		Where("ABS(ABS(amount) - ?) / ? < 0.02", docAmount, docAmount)
+
+	// Date must be AFTER doc.DocumentDate and within payment_cycle_days
+	if dateStr != "" {
+		if docDate, err := time.Parse("2006-01-02", dateStr); err == nil {
+			from := docDate.Format("2006-01-02")
+			to := docDate.AddDate(0, 0, cycleDays).Format("2006-01-02")
+			query = query.Where("date >= ? AND date <= ?", from, to)
 		}
-		query = query.Where("LOWER(name) LIKE ? OR LOWER(merchant_name) LIKE ? OR LOWER(vendor) LIKE ? OR LOWER(name) LIKE ? OR LOWER(merchant_name) LIKE ?",
-			vLike, vLike, vLike, parentLike, parentLike)
 	}
 
 	var candidates []models.Transaction
-	query.Limit(5).Find(&candidates)
+	query.Limit(10).Find(&candidates)
 
 	bestScore := 0
 	var bestTx *models.Transaction
+
 	for i := range candidates {
-		s := scoreDocToTransaction(doc, candidates[i], dateStr, vendorName)
-		if s > bestScore {
-			bestScore = s
+		tx := candidates[i]
+		score := 0
+
+		// Amount scoring (+40 for exact/near match within 2%)
+		if tx.Amount != nil {
+			txAmt := math.Abs(*tx.Amount)
+			diff := math.Abs(txAmt - docAmount)
+			if docAmount > 0 && diff/docAmount < 0.02 {
+				score += 40
+			}
+		}
+
+		// Vendor scoring (+35 for fuzzy >= 0.6)
+		if vendorName != "" {
+			vnLower := strings.ToLower(vendorName)
+			txFields := []string{}
+			if tx.Name != nil {
+				txFields = append(txFields, strings.ToLower(*tx.Name))
+			}
+			if tx.MerchantName != nil {
+				txFields = append(txFields, strings.ToLower(*tx.MerchantName))
+			}
+			if tx.Vendor != nil {
+				txFields = append(txFields, strings.ToLower(*tx.Vendor))
+			}
+
+			bestSim := 0.0
+			for _, field := range txFields {
+				if field == vnLower {
+					bestSim = 1.0
+					break
+				}
+				sim := services.BidirectionalSimilarity(vnLower, field)
+				if sim > bestSim {
+					bestSim = sim
+				}
+			}
+			if bestSim >= 0.6 {
+				score += 35
+			}
+		}
+
+		// Date scoring (+20 for within cycle)
+		if dateStr != "" && tx.Date != nil {
+			docDate, err1 := time.Parse("2006-01-02", dateStr)
+			txDate, err2 := time.Parse("2006-01-02", *tx.Date)
+			if err1 == nil && err2 == nil {
+				daysDiff := txDate.Sub(docDate).Hours() / 24
+				if daysDiff >= 0 && daysDiff <= float64(cycleDays) {
+					score += 20
+				}
+			}
+		}
+
+		if score > bestScore {
+			bestScore = score
 			bestTx = &candidates[i]
 		}
 	}
 
-	return h.applyMatch(doc, bestTx, bestScore)
+	if bestTx != nil && bestScore >= 40 {
+		status := "suspect"
+		if bestScore >= 75 {
+			status = "matched"
+			atomic.AddInt32(&matchAllMatched, 1)
+		} else {
+			atomic.AddInt32(&matchAllSuspect, 1)
+		}
+
+		h.GormDB.Model(bestTx).Updates(map[string]interface{}{
+			"matched_document_id":   doc.ID,
+			"document_match_score":  bestScore,
+			"document_match_status": status,
+		})
+
+		if status == "matched" {
+			h.GormDB.Model(&doc).Update("status", "auto_matched")
+		}
+		return status
+	}
+
+	return ""
 }
 
 // matchStatementMultiplePayments finds multiple bank transactions that sum to statement total.
-// Pattern: Amex statement $15,000 → 8 payments summing to $15,000.
-func (h *DocumentMatchHandler) matchStatementMultiplePayments(doc models.Document, vendor models.Vendor, cycleDays int) string {
+// Pattern: Amex statement $15,000 -> 8 payments summing to $15,000.
+// Uses a greedy approach: sort by absolute amount descending, accumulate until sum >= target * 0.98.
+func (h *DocumentMatchHandler) matchStatementMultiplePayments(doc models.Document, vendor models.Vendor) string {
 	if doc.TotalAmount == nil || *doc.TotalAmount == 0 {
 		return ""
 	}
@@ -373,7 +439,14 @@ func (h *DocumentMatchHandler) matchStatementMultiplePayments(doc models.Documen
 		vendorName = *doc.VendorName
 	}
 
-	// Build date range: period_start to period_end+30 (or doc_date ± cycle_days)
+	// Payment cycle days: default 30 if nil
+	cycleDays := 30
+	if vendor.PaymentCycleDays != nil && *vendor.PaymentCycleDays > 0 {
+		cycleDays = *vendor.PaymentCycleDays
+	}
+
+	// Build date range: period_start (from ocr_raw if available, else doc_date - cycle_days)
+	// to period_end + 30 days
 	fromDate := ""
 	toDate := ""
 	if doc.DocumentDate != nil {
@@ -397,15 +470,31 @@ func (h *DocumentMatchHandler) matchStatementMultiplePayments(doc models.Documen
 	}
 
 	var candidates []models.Transaction
-	query.Order("date ASC").Limit(50).Find(&candidates)
+	query.Limit(50).Find(&candidates)
 
 	if len(candidates) == 0 {
 		return ""
 	}
 
-	// Sum all matching transactions and check if they approximate the statement total
+	// Sort by absolute amount descending (greedy approach)
+	sort.Slice(candidates, func(i, j int) bool {
+		ai := 0.0
+		aj := 0.0
+		if candidates[i].Amount != nil {
+			ai = math.Abs(*candidates[i].Amount)
+		}
+		if candidates[j].Amount != nil {
+			aj = math.Abs(*candidates[j].Amount)
+		}
+		return ai > aj
+	})
+
+	// Greedy accumulation: add transactions until sum >= target * 0.98
+	target := stmtTotal
+	threshold := target * 0.98
 	var matchedTxs []models.Transaction
 	runningSum := 0.0
+
 	for i := range candidates {
 		if candidates[i].Amount == nil {
 			continue
@@ -413,12 +502,15 @@ func (h *DocumentMatchHandler) matchStatementMultiplePayments(doc models.Documen
 		txAmt := math.Abs(*candidates[i].Amount)
 		runningSum += txAmt
 		matchedTxs = append(matchedTxs, candidates[i])
+		if runningSum >= threshold {
+			break
+		}
 	}
 
-	// Check if sum is within 2% of statement total
-	diff := math.Abs(runningSum - stmtTotal)
-	if stmtTotal > 0 && diff/stmtTotal <= 0.02 && len(matchedTxs) > 0 {
-		// Match found — link all transactions to this statement
+	// Check if accumulated sum is within 2% of target
+	diff := math.Abs(runningSum - target)
+	if target > 0 && diff/target <= 0.02 && len(matchedTxs) > 0 {
+		// Match found -- store all transaction IDs as JSON array in doc.MatchedTransactionIDs
 		var txIDs []string
 		for _, tx := range matchedTxs {
 			txIDs = append(txIDs, tx.ID)
@@ -429,12 +521,11 @@ func (h *DocumentMatchHandler) matchStatementMultiplePayments(doc models.Documen
 			})
 		}
 
-		// Store all matched transaction IDs in the document
 		txIDsJSON, _ := json.Marshal(txIDs)
 		txIDsStr := string(txIDsJSON)
 		h.GormDB.Model(&doc).Updates(map[string]interface{}{
 			"matched_transaction_ids": txIDsStr,
-			"status":                  "auto_matched",
+			"status":                  "matched",
 		})
 
 		atomic.AddInt32(&matchAllMatched, 1)
@@ -446,7 +537,10 @@ func (h *DocumentMatchHandler) matchStatementMultiplePayments(doc models.Documen
 	return ""
 }
 
-// matchInvoiceToStatement links an invoice to an existing statement from the same vendor.
+// matchInvoiceToStatement links an individual invoice to an existing matched statement
+// from the same vendor. Searches statement documents by vendor, then checks
+// statement_line_items for the invoice number. If found, links the invoice to
+// the statement's matched transaction.
 func (h *DocumentMatchHandler) matchInvoiceToStatement(doc models.Document) string {
 	vendorName := ""
 	if doc.VendorName != nil {
@@ -456,44 +550,39 @@ func (h *DocumentMatchHandler) matchInvoiceToStatement(doc models.Document) stri
 		return ""
 	}
 
-	invoiceNum := ""
+	invoiceNumber := ""
 	if doc.VendorInvoiceNumber != nil {
-		invoiceNum = *doc.VendorInvoiceNumber
+		invoiceNumber = *doc.VendorInvoiceNumber
 	}
-	if invoiceNum == "" && doc.DocumentNumber != nil {
-		invoiceNum = *doc.DocumentNumber
+	if invoiceNumber == "" && doc.DocumentNumber != nil {
+		invoiceNumber = *doc.DocumentNumber
 	}
-	if invoiceNum == "" {
+	if invoiceNumber == "" {
 		return ""
 	}
 
-	// Find a statement_line_item that references this invoice number
-	var lineItem models.StatementLineItem
-	err := h.GormDB.Where("LOWER(invoice_number) = LOWER(?)", invoiceNum).
-		First(&lineItem).Error
-	if err != nil {
-		return ""
-	}
+	// Find recent matched statement documents from the same vendor
+	var statements []models.Document
+	h.GormDB.Where("document_type = 'STATEMENT' AND LOWER(vendor_name) = LOWER(?) AND matched_transaction_id IS NOT NULL",
+		vendorName).Order("created_at DESC").Limit(5).Find(&statements)
 
-	// Link the invoice to the statement
-	if lineItem.StatementDocumentID != nil {
-		h.GormDB.Model(&lineItem).Updates(map[string]interface{}{
-			"linked_document_id": doc.ID,
-			"status":             "invoice_found",
-		})
-
-		// Check if the statement has a matched transaction — if so, this invoice is covered
-		var stmt models.Document
-		if err := h.GormDB.First(&stmt, *lineItem.StatementDocumentID).Error; err == nil {
+	for _, stmt := range statements {
+		// Check if this invoice number appears in the statement's line items
+		var sli models.StatementLineItem
+		if err := h.GormDB.Where("statement_document_id = ? AND invoice_number = ?",
+			stmt.ID, invoiceNumber).First(&sli).Error; err == nil {
+			// Found -- link the invoice to the statement's matched transaction
 			if stmt.MatchedTransactionID != nil && *stmt.MatchedTransactionID != "" {
-				h.GormDB.Model(&doc).Update("status", "auto_matched")
+				h.GormDB.Model(&doc).Updates(map[string]interface{}{
+					"matched_transaction_id": *stmt.MatchedTransactionID,
+					"status":                 "matched",
+				})
 				atomic.AddInt32(&matchAllMatched, 1)
+				log.Printf("[DocMatch] Invoice-to-statement: doc %d linked to statement %d (txn %s)",
+					doc.ID, stmt.ID, *stmt.MatchedTransactionID)
 				return "matched"
 			}
 		}
-
-		h.GormDB.Model(&doc).Update("status", "linked_to_statement")
-		return "linked"
 	}
 
 	return ""
