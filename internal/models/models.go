@@ -902,3 +902,123 @@ type StatementLineItem struct {
 }
 
 func (StatementLineItem) TableName() string { return "statement_line_items" }
+
+// ──────────────────────────────────────────────
+// Vendor Receivables (core returns, RMAs, overcharges)
+// ──────────────────────────────────────────────
+
+type VendorReceivable struct {
+	ID                    string     `gorm:"column:id;primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	ShopID                *int       `gorm:"column:shop_id" json:"shop_id"`
+	ShopName              *string    `gorm:"column:shop_name" json:"shop_name"`
+	VendorID              *string    `gorm:"column:vendor_id" json:"vendor_id"`
+	VendorName            string     `gorm:"column:vendor_name;not null" json:"vendor_name"`
+	InvoiceDocumentID     *int       `gorm:"column:invoice_document_id" json:"invoice_document_id"`
+	InvoiceNumber         *string    `gorm:"column:invoice_number" json:"invoice_number"`
+	InvoiceDate           *string    `gorm:"column:invoice_date" json:"invoice_date"`
+	PartNumber            *string    `gorm:"column:part_number" json:"part_number"`
+	PartNumberNormalized  *string    `gorm:"column:part_number_normalized" json:"part_number_normalized"`
+	Description           *string    `gorm:"column:description" json:"description"`
+	Quantity              *float64   `gorm:"column:quantity" json:"quantity"`
+	UnitPrice             *float64   `gorm:"column:unit_price" json:"unit_price"`
+	TotalAmount           float64    `gorm:"column:total_amount;not null" json:"total_amount"`
+	ReceivableType        string     `gorm:"column:receivable_type;not null" json:"receivable_type"`
+	Status                string     `gorm:"column:status;default:open" json:"status"`
+	RONumber              *string    `gorm:"column:ro_number" json:"ro_number"`
+	Notes                 *string    `gorm:"column:notes" json:"notes"`
+	CreatedAt             time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt             time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	Vendor                *Vendor    `gorm:"foreignKey:VendorID;references:ID" json:"vendor,omitempty"`
+	InvoiceDocument       *Document  `gorm:"foreignKey:InvoiceDocumentID;references:ID" json:"invoice_document,omitempty"`
+}
+
+func (VendorReceivable) TableName() string { return "vendor_receivables" }
+
+// ──────────────────────────────────────────────
+// Vendor Credits
+// ──────────────────────────────────────────────
+
+type VendorCredit struct {
+	ID                     string     `gorm:"column:id;primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	VendorID               *string    `gorm:"column:vendor_id" json:"vendor_id"`
+	VendorName             string     `gorm:"column:vendor_name;not null" json:"vendor_name"`
+	CreditDocumentID       *int       `gorm:"column:credit_document_id" json:"credit_document_id"`
+	CreditMemoNumber       *string    `gorm:"column:credit_memo_number" json:"credit_memo_number"`
+	CreditDate             *string    `gorm:"column:credit_date" json:"credit_date"`
+	TotalAmount            float64    `gorm:"column:total_amount;not null" json:"total_amount"`
+	RemainingAmount        *float64   `gorm:"column:remaining_amount" json:"remaining_amount"`
+	ReferenceInvoiceNumber *string    `gorm:"column:reference_invoice_number" json:"reference_invoice_number"`
+	ReferencePONumber      *string    `gorm:"column:reference_po_number" json:"reference_po_number"`
+	Status                 string     `gorm:"column:status;default:open" json:"status"`
+	Notes                  *string    `gorm:"column:notes" json:"notes"`
+	CreatedAt              time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt              time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	Vendor                 *Vendor    `gorm:"foreignKey:VendorID;references:ID" json:"vendor,omitempty"`
+	CreditDocument         *Document  `gorm:"foreignKey:CreditDocumentID;references:ID" json:"credit_document,omitempty"`
+}
+
+func (VendorCredit) TableName() string { return "vendor_credits" }
+
+// ──────────────────────────────────────────────
+// Vendor Credit Applications
+// ──────────────────────────────────────────────
+
+type VendorCreditApplication struct {
+	ID           string    `gorm:"column:id;primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	CreditID     string    `gorm:"column:credit_id;not null" json:"credit_id"`
+	ReceivableID string    `gorm:"column:receivable_id;not null" json:"receivable_id"`
+	Amount       float64   `gorm:"column:amount;not null" json:"amount"`
+	AppliedBy    *string   `gorm:"column:applied_by" json:"applied_by"`
+	AppliedAt    time.Time `gorm:"column:applied_at;autoCreateTime" json:"applied_at"`
+	Notes        *string   `gorm:"column:notes" json:"notes"`
+	Credit       *VendorCredit     `gorm:"foreignKey:CreditID;references:ID" json:"credit,omitempty"`
+	Receivable   *VendorReceivable `gorm:"foreignKey:ReceivableID;references:ID" json:"receivable,omitempty"`
+}
+
+func (VendorCreditApplication) TableName() string { return "vendor_credit_applications" }
+
+// ──────────────────────────────────────────────
+// Part Match Results
+// ──────────────────────────────────────────────
+
+type PartMatchResult struct {
+	ID                   string     `gorm:"column:id;primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	DocumentID           *int       `gorm:"column:document_id" json:"document_id"`
+	LineItemIndex        *int       `gorm:"column:line_item_index" json:"line_item_index"`
+	VendorPartNumber     *string    `gorm:"column:vendor_part_number" json:"vendor_part_number"`
+	VendorPartNormalized *string    `gorm:"column:vendor_part_normalized" json:"vendor_part_normalized"`
+	MatchedRONumber      *string    `gorm:"column:matched_ro_number" json:"matched_ro_number"`
+	MatchedROLineItemID  *string    `gorm:"column:matched_ro_line_item_id" json:"matched_ro_line_item_id"`
+	MatchedPartNumber    *string    `gorm:"column:matched_part_number" json:"matched_part_number"`
+	MatchScore           *int       `gorm:"column:match_score" json:"match_score"`
+	MatchRule            *string    `gorm:"column:match_rule" json:"match_rule"`
+	MatchConfidence      *float64   `gorm:"column:match_confidence" json:"match_confidence"`
+	AITiebreakerUsed     bool       `gorm:"column:ai_tiebreaker_used;default:false" json:"ai_tiebreaker_used"`
+	AIReasoning          *string    `gorm:"column:ai_reasoning" json:"ai_reasoning"`
+	Status               string     `gorm:"column:status;default:pending" json:"status"`
+	ConfirmedBy          *string    `gorm:"column:confirmed_by" json:"confirmed_by"`
+	ConfirmedAt          *time.Time `gorm:"column:confirmed_at" json:"confirmed_at"`
+	CreatedAt            time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	Document             *Document  `gorm:"foreignKey:DocumentID;references:ID" json:"document,omitempty"`
+}
+
+func (PartMatchResult) TableName() string { return "part_match_results" }
+
+// ──────────────────────────────────────────────
+// Vendor Part Mappings (learning system)
+// ──────────────────────────────────────────────
+
+type VendorPartMapping struct {
+	ID                   int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	VendorName           string    `gorm:"column:vendor_name;not null" json:"vendor_name"`
+	VendorPartNumber     string    `gorm:"column:vendor_part_number;not null" json:"vendor_part_number"`
+	VendorPartNormalized string    `gorm:"column:vendor_part_normalized;not null" json:"vendor_part_normalized"`
+	InternalPartNumber   *string   `gorm:"column:internal_part_number" json:"internal_part_number"`
+	Description          *string   `gorm:"column:description" json:"description"`
+	MatchCount           int       `gorm:"column:match_count;default:1" json:"match_count"`
+	AutoMatchEnabled     bool      `gorm:"column:auto_match_enabled;default:false" json:"auto_match_enabled"`
+	CreatedAt            time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt            time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+}
+
+func (VendorPartMapping) TableName() string { return "vendor_part_mappings" }

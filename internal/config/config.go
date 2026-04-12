@@ -33,6 +33,9 @@ type Config struct {
 	WickedFileAPIURL       string
 	WickedFileAPIKey       string
 	WickedFileEmailIntake  string
+	SMSAPIBaseURL          string
+	SMSAPIEmail            string
+	SMSAPIPassword         string
 }
 
 func Load() *Config {
@@ -71,5 +74,8 @@ func Load() *Config {
 		WickedFileAPIURL:       os.Getenv("WICKEDFILE_API_URL"),
 		WickedFileAPIKey:       os.Getenv("WICKEDFILE_API_KEY"),
 		WickedFileEmailIntake:  os.Getenv("WICKEDFILE_EMAIL_INTAKE"),
+		SMSAPIBaseURL:          os.Getenv("SMS_API_BASE_URL"),
+		SMSAPIEmail:            os.Getenv("SMS_API_EMAIL"),
+		SMSAPIPassword:         os.Getenv("SMS_API_PASSWORD"),
 	}
 }

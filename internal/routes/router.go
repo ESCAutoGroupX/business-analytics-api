@@ -42,6 +42,10 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	documentHandler := &handlers.DocumentHandler{GormDB: gormDB, Cfg: cfg}
 	apHandler := &handlers.APHandler{GormDB: gormDB}
 	apHandler.AutoMigrate()
+	matchingHandler := &handlers.MatchingHandler{GormDB: gormDB, Cfg: cfg}
+	matchingHandler.AutoMigrate()
+	receivablesHandler := &handlers.ReceivablesHandler{GormDB: gormDB, Cfg: cfg}
+	receivablesHandler.AutoMigrate()
 	notificationHandler := &handlers.NotificationHandler{
 		Email: &notifications.EmailSender{GormDB: gormDB, Cfg: cfg},
 	}
@@ -349,6 +353,30 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			ap.GET("/:id", apHandler.GetEntry)
 			ap.POST("/:id/authorize", apHandler.Authorize)
 			ap.POST("/:id/mark-paid", apHandler.MarkPaid)
+		}
+
+		// Part Matching
+		matching := protected.Group("/matching")
+		{
+			matching.POST("/invoice-to-ro", matchingHandler.MatchInvoiceToRO)
+			matching.POST("/confirm", matchingHandler.ConfirmMatch)
+			matching.GET("/results/:document_id", matchingHandler.GetResults)
+			matching.GET("/vendor-mappings/:vendor_name", matchingHandler.GetVendorMappings)
+		}
+
+		// Receivables & Credits
+		receivables := protected.Group("/receivables")
+		{
+			receivables.POST("/", receivablesHandler.CreateReceivable)
+			receivables.GET("/", receivablesHandler.ListReceivables)
+			receivables.GET("/aging", receivablesHandler.AgingReport)
+			receivables.PATCH("/:id", receivablesHandler.PatchReceivable)
+		}
+		credits := protected.Group("/credits")
+		{
+			credits.POST("/", receivablesHandler.CreateCredit)
+			credits.GET("/", receivablesHandler.ListCredits)
+			credits.POST("/:id/apply", receivablesHandler.ApplyCredit)
 		}
 
 		// Settings / Integrations
