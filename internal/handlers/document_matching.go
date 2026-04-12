@@ -3,11 +3,24 @@ package handlers
 import (
 	"log"
 	"math"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/services"
+)
+
+// ── Match-All batch state (atomic) ──────────────────────────────
+var (
+	matchAllRunning   int32
+	matchAllTotal     int32
+	matchAllCompleted int32
+	matchAllMatched   int32
+	matchAllSuspect   int32
 )
 
 // AutoMigrate adds document match columns to transactions table.
@@ -105,8 +118,63 @@ func scoreDocToTransaction(doc models.Document, tx models.Transaction, dateStr, 
 	return score
 }
 
-// MatchDocumentsToTransactions is the background auto-match job.
-// It runs after document upload and on Plaid sync.
+// MatchAll handles POST /documents/match-all — triggers batch matching.
+func (h *DocumentMatchHandler) MatchAll(c *gin.Context) {
+	if !atomic.CompareAndSwapInt32(&matchAllRunning, 0, 1) {
+		c.JSON(http.StatusConflict, gin.H{
+			"detail":    "match job already in progress",
+			"completed": atomic.LoadInt32(&matchAllCompleted),
+			"total":     atomic.LoadInt32(&matchAllTotal),
+		})
+		return
+	}
+
+	atomic.StoreInt32(&matchAllCompleted, 0)
+	atomic.StoreInt32(&matchAllMatched, 0)
+	atomic.StoreInt32(&matchAllSuspect, 0)
+
+	var docs []models.Document
+	h.GormDB.Where("(is_financial IS NULL OR is_financial = true)").
+		Where("matched_transaction_id IS NULL").
+		Where("status IN ('pending', 'unmatched', 'auto_matched', 'needs_review')").
+		Where("total_amount IS NOT NULL AND total_amount > 0").
+		Find(&docs)
+
+	total := int32(len(docs))
+	atomic.StoreInt32(&matchAllTotal, total)
+
+	c.JSON(http.StatusOK, gin.H{"status": "started", "total": total})
+
+	go h.runMatchAll(docs)
+}
+
+// MatchStatus handles GET /documents/match-status.
+func (h *DocumentMatchHandler) MatchStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"completed": atomic.LoadInt32(&matchAllCompleted),
+		"total":     atomic.LoadInt32(&matchAllTotal),
+		"running":   atomic.LoadInt32(&matchAllRunning) == 1,
+		"matched":   atomic.LoadInt32(&matchAllMatched),
+		"suspect":   atomic.LoadInt32(&matchAllSuspect),
+	})
+}
+
+// runMatchAll is the goroutine that processes all unmatched documents.
+func (h *DocumentMatchHandler) runMatchAll(docs []models.Document) {
+	defer atomic.StoreInt32(&matchAllRunning, 0)
+	log.Println("[DocMatch] Starting batch match job")
+
+	for _, doc := range docs {
+		h.matchSingleDoc(doc)
+		atomic.AddInt32(&matchAllCompleted, 1)
+	}
+
+	log.Printf("[DocMatch] Batch match complete: %d matched, %d suspect out of %d documents",
+		atomic.LoadInt32(&matchAllMatched), atomic.LoadInt32(&matchAllSuspect), len(docs))
+}
+
+// MatchDocumentsToTransactions is the background auto-match job (no progress tracking).
+// Called from cron / Plaid sync.
 func (h *DocumentMatchHandler) MatchDocumentsToTransactions() {
 	log.Println("[DocMatch] Starting auto-match job")
 
@@ -119,70 +187,79 @@ func (h *DocumentMatchHandler) MatchDocumentsToTransactions() {
 
 	matched := 0
 	suspect := 0
-
 	for _, doc := range docs {
-		amt := *doc.TotalAmount
-		vendorName := ""
-		if doc.VendorName != nil {
-			vendorName = *doc.VendorName
+		if h.matchSingleDoc(doc) == "matched" {
+			matched++
+		} else if h.matchSingleDoc(doc) == "suspect" {
+			suspect++
 		}
-		dateStr := ""
-		if doc.DocumentDate != nil {
-			dateStr = *doc.DocumentDate
-		}
+	}
+	log.Printf("[DocMatch] Auto-match complete: %d matched, %d suspect out of %d documents", matched, suspect, len(docs))
+}
 
-		query := h.GormDB.Model(&models.Transaction{}).
-			Where("(document_match_status IS NULL OR document_match_status = 'none')").
-			Where("ABS(amount - ?) < ? OR ABS(amount + ?) < ?",
-				amt, amt*0.05+0.01, amt, amt*0.05+0.01)
+// matchSingleDoc attempts to match one document to a transaction. Returns status string.
+func (h *DocumentMatchHandler) matchSingleDoc(doc models.Document) string {
+	amt := *doc.TotalAmount
+	vendorName := ""
+	if doc.VendorName != nil {
+		vendorName = *doc.VendorName
+	}
+	dateStr := ""
+	if doc.DocumentDate != nil {
+		dateStr = *doc.DocumentDate
+	}
 
-		if dateStr != "" {
-			if docDate, err := time.Parse("2006-01-02", dateStr); err == nil {
-				from := docDate.AddDate(0, 0, -14).Format("2006-01-02")
-				to := docDate.AddDate(0, 0, 14).Format("2006-01-02")
-				query = query.Where("date >= ? AND date <= ?", from, to)
-			}
-		}
+	query := h.GormDB.Model(&models.Transaction{}).
+		Where("(document_match_status IS NULL OR document_match_status = 'none')").
+		Where("ABS(amount - ?) < ? OR ABS(amount + ?) < ?",
+			amt, amt*0.05+0.01, amt, amt*0.05+0.01)
 
-		if vendorName != "" {
-			vLike := "%" + strings.ToLower(vendorName) + "%"
-			query = query.Where("LOWER(name) LIKE ? OR LOWER(merchant_name) LIKE ? OR LOWER(vendor) LIKE ?",
-				vLike, vLike, vLike)
-		}
-
-		var candidates []models.Transaction
-		query.Limit(5).Find(&candidates)
-
-		bestScore := 0
-		var bestTx *models.Transaction
-		for i := range candidates {
-			s := scoreDocToTransaction(doc, candidates[i], dateStr, vendorName)
-			if s > bestScore {
-				bestScore = s
-				bestTx = &candidates[i]
-			}
-		}
-
-		if bestTx != nil && bestScore >= 40 {
-			status := "suspect"
-			if bestScore >= 75 {
-				status = "matched"
-				matched++
-			} else {
-				suspect++
-			}
-
-			h.GormDB.Model(bestTx).Updates(map[string]interface{}{
-				"matched_document_id":   doc.ID,
-				"document_match_score":  bestScore,
-				"document_match_status": status,
-			})
-
-			if status == "matched" {
-				h.GormDB.Model(&doc).Update("status", "auto_matched")
-			}
+	if dateStr != "" {
+		if docDate, err := time.Parse("2006-01-02", dateStr); err == nil {
+			from := docDate.AddDate(0, 0, -14).Format("2006-01-02")
+			to := docDate.AddDate(0, 0, 14).Format("2006-01-02")
+			query = query.Where("date >= ? AND date <= ?", from, to)
 		}
 	}
 
-	log.Printf("[DocMatch] Auto-match complete: %d matched, %d suspect out of %d documents", matched, suspect, len(docs))
+	if vendorName != "" {
+		vLike := "%" + strings.ToLower(vendorName) + "%"
+		query = query.Where("LOWER(name) LIKE ? OR LOWER(merchant_name) LIKE ? OR LOWER(vendor) LIKE ?",
+			vLike, vLike, vLike)
+	}
+
+	var candidates []models.Transaction
+	query.Limit(5).Find(&candidates)
+
+	bestScore := 0
+	var bestTx *models.Transaction
+	for i := range candidates {
+		s := scoreDocToTransaction(doc, candidates[i], dateStr, vendorName)
+		if s > bestScore {
+			bestScore = s
+			bestTx = &candidates[i]
+		}
+	}
+
+	if bestTx != nil && bestScore >= 40 {
+		status := "suspect"
+		if bestScore >= 75 {
+			status = "matched"
+			atomic.AddInt32(&matchAllMatched, 1)
+		} else {
+			atomic.AddInt32(&matchAllSuspect, 1)
+		}
+
+		h.GormDB.Model(bestTx).Updates(map[string]interface{}{
+			"matched_document_id":   doc.ID,
+			"document_match_score":  bestScore,
+			"document_match_status": status,
+		})
+
+		if status == "matched" {
+			h.GormDB.Model(&doc).Update("status", "auto_matched")
+		}
+		return status
+	}
+	return ""
 }
