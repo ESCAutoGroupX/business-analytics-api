@@ -51,6 +51,10 @@ func Start(gormDB *gorm.DB, cfg *config.Config) *cron.Cron {
 	c.AddFunc("0 7 * * *", wrapSimpleJob("alert-low-balance", emailSender.CheckLowBankBalance))
 	c.AddFunc("0 7 * * 1", wrapSimpleJob("alert-reconciliation", emailSender.CheckReconciliationAlert))
 
+	// Document auto-match — run every 30 minutes
+	docMatchHandler := &handlers.DocumentMatchHandler{GormDB: gormDB}
+	c.AddFunc("*/30 * * * *", wrapSimpleJob("doc-auto-match", docMatchHandler.MatchDocumentsToTransactions))
+
 	c.Start()
 	log.Println("Cron scheduler started (sync + snapshots + alerts)")
 
