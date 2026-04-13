@@ -114,6 +114,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Vendors
 		vendors := protected.Group("/vendors")
 		{
+            vendors.POST("/import", vendorHandler.ImportVendors)
 			vendors.POST("/", vendorHandler.CreateVendor)
 			vendors.GET("/", vendorHandler.ListVendors)
 			vendors.GET("/lookup", vendorHandler.LookupVendor)
@@ -292,6 +293,12 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			transactions.PATCH("/:transaction_id", transactionHandler.UpdateTransaction)
 			transactions.DELETE("/:transaction_id", transactionHandler.DeleteTransaction)
 			transactions.POST("/:transaction_id/upload-document", transactionHandler.UploadDocument)
+		}
+
+		// Admin
+		admin := protected.Group("/admin")
+		{
+			admin.POST("/migrate-plaid-transactions", transactionHandler.MigratePlaidTransactions)
 		}
 
 		// PayBills

@@ -1,6 +1,9 @@
 package handlers
 
 import (
+"encoding/json"
+"fmt"
+"io"
 	"errors"
 	"log"
 	"net/http"
@@ -323,4 +326,137 @@ func (h *VendorHandler) LookupVendor(c *gin.Context) {
 		"found":  true,
 		"vendor": vendorToResponse(&vendor),
 	})
+}
+
+type wfVendorRecord struct {
+	ID                string  `json:"_id"`
+	Vendor            string  `json:"vendor"`
+	IsVerified        bool    `json:"isVerified"`
+	IsPartsVendor     string  `json:"isPartsVendor"`
+	IsStatementVendor bool    `json:"isStatementVendor"`
+	StatementFreq     *string `json:"statementFrequency"`
+	Ignored           bool    `json:"ignored"`
+	IsCogs            bool    `json:"isCogs"`
+	Category          *string `json:"category"`
+	SubCategory       *string `json:"subCategory"`
+	WickedFileVendor  *string `json:"wickedFileVendor"`
+}
+
+type importResult struct {
+	Total   int      `json:"total"`
+	Added   int      `json:"added"`
+	Updated int      `json:"updated"`
+	Skipped int      `json:"skipped"`
+	Errors  []string `json:"errors"`
+}
+
+func (h *VendorHandler) ImportVendors(c *gin.Context) {
+	h.GormDB.Exec(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS wf_id VARCHAR(100)`)
+	h.GormDB.Exec(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS wf_category VARCHAR(100)`)
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "file field required"})
+		return
+	}
+	f, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not open file"})
+		return
+	}
+	defer f.Close()
+
+	body, err := io.ReadAll(f)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not read file"})
+		return
+	}
+
+	var records []wfVendorRecord
+	if err := json.Unmarshal(body, &records); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "invalid JSON: " + err.Error()})
+		return
+	}
+
+	result := importResult{Total: len(records), Errors: []string{}}
+
+	for _, rec := range records {
+		if rec.Ignored || strings.TrimSpace(rec.Vendor) == "" {
+			result.Skipped++
+			continue
+		}
+		normalized := strings.ToLower(strings.TrimSpace(rec.Vendor))
+		isPartsVendor := strings.ToUpper(rec.IsPartsVendor)
+		if isPartsVendor == "" {
+			isPartsVendor = "NEVER"
+		}
+
+		var existing models.Vendor
+		findErr := h.GormDB.Where("normalized_name = ?", normalized).First(&existing).Error
+
+		if findErr == nil {
+			updates := map[string]interface{}{
+				"is_cogs_vendor":      rec.IsCogs,
+				"is_statement_vendor": rec.IsStatementVendor,
+				"is_parts_vendor":     isPartsVendor,
+				"updated_at":          time.Now().UTC(),
+			}
+			if rec.StatementFreq != nil && *rec.StatementFreq != "" {
+				updates["billing_frequency"] = *rec.StatementFreq
+			}
+			if rec.Category != nil && *rec.Category != "" {
+				updates["category"] = *rec.Category
+			}
+			if err := h.GormDB.Model(&existing).Updates(updates).Error; err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("update %s: %v", rec.Vendor, err))
+				continue
+			}
+			h.GormDB.Exec(`UPDATE vendors SET wf_id = $1, wf_category = $2 WHERE id = $3`, rec.ID, categoryStr(rec.Category), existing.ID)
+			h.upsertAlias(existing.ID, rec.Vendor, "wf")
+			if rec.WickedFileVendor != nil && strings.TrimSpace(*rec.WickedFileVendor) != "" {
+				if strings.ToLower(strings.TrimSpace(*rec.WickedFileVendor)) != normalized {
+					h.upsertAlias(existing.ID, strings.TrimSpace(*rec.WickedFileVendor), "wf")
+				}
+			}
+			result.Updated++
+		} else {
+			isStmt := rec.IsStatementVendor
+			isCogs := rec.IsCogs
+			newVendor := models.Vendor{
+				ID:                uuid.New().String(),
+				Name:              rec.Vendor,
+				NormalizedName:    &normalized,
+				IsPartsVendor:     &isPartsVendor,
+				IsCogsVendor:      &isCogs,
+				IsStatementVendor: &isStmt,
+				BillingFrequency:  rec.StatementFreq,
+				Category:          rec.Category,
+			}
+			if err := h.GormDB.Create(&newVendor).Error; err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("insert %s: %v", rec.Vendor, err))
+				continue
+			}
+			h.GormDB.Exec(`UPDATE vendors SET wf_id = $1, wf_category = $2 WHERE id = $3`, rec.ID, categoryStr(rec.Category), newVendor.ID)
+			h.upsertAlias(newVendor.ID, rec.Vendor, "wf")
+			if rec.WickedFileVendor != nil && strings.TrimSpace(*rec.WickedFileVendor) != "" {
+				if strings.ToLower(strings.TrimSpace(*rec.WickedFileVendor)) != normalized {
+					h.upsertAlias(newVendor.ID, strings.TrimSpace(*rec.WickedFileVendor), "wf")
+				}
+			}
+			result.Added++
+		}
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *VendorHandler) upsertAlias(vendorID, alias, source string) {
+	h.GormDB.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source) VALUES (gen_random_uuid(), $1, $2, $3) ON CONFLICT DO NOTHING`, vendorID, alias, source)
+}
+
+func categoryStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

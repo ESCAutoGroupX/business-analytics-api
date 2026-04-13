@@ -31,6 +31,54 @@ func (h *TransactionHandler) sqlDB() *sql.DB {
 	return db
 }
 
+// MigratePlaidTransactions populates plaid_transactions from the existing transactions table.
+func (h *TransactionHandler) MigratePlaidTransactions(c *gin.Context) {
+	db := h.sqlDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database unavailable"})
+		return
+	}
+
+	query := `
+		INSERT INTO plaid_transactions (
+			id, plaid_transaction_id, account_id, location_name,
+			transaction_date, settlement_date, amount, description,
+			merchant_name, normalized_merchant, transaction_type,
+			match_status, created_at
+		)
+		SELECT
+			gen_random_uuid(),
+			t.plaid_id,
+			t.account_id,
+			COALESCE(cla.location_name, 'Unknown'),
+			t.date,
+			t.authorized_date,
+			t.amount,
+			t.name,
+			COALESCE(t.merchant_name, t.name),
+			LOWER(TRIM(COALESCE(t.merchant_name, t.name))),
+			CASE WHEN t.amount > 0 THEN 'spend' ELSE 'receive' END,
+			'pending',
+			NOW()
+		FROM transactions t
+		LEFT JOIN card_location_assignments cla ON cla.plaid_account_id = t.account_id
+		WHERE t.plaid_id IS NOT NULL AND t.plaid_id != ''
+		ON CONFLICT (plaid_transaction_id) DO NOTHING`
+
+	result, err := db.Exec(query)
+	if err != nil {
+		log.Printf("MigratePlaidTransactions error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "migration failed", "error": err.Error()})
+		return
+	}
+
+	rows, _ := result.RowsAffected()
+	c.JSON(http.StatusOK, gin.H{
+		"migrated": rows,
+		"message":  fmt.Sprintf("Migrated %d transactions to plaid_transactions", rows),
+	})
+}
+
 // POST /transactions/
 func (h *TransactionHandler) CreateTransaction(c *gin.Context) {
 	var body map[string]interface{}
