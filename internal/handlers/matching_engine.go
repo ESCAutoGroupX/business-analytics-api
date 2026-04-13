@@ -217,6 +217,7 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	}
 
 	// ── 3. Direct vendor: match each invoice individually ────────
+	debugCount := 0
 	for _, doc := range directDocs {
 		isCOD := isCODVendor(doc)
 		dateWindow := 3
@@ -224,7 +225,13 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 			dateWindow = 0
 		}
 
-		best, bestScore := h.findDirectMatch(doc, txns, consumed, aliases, isCOD, dateWindow)
+		debug := debugCount < 5
+		if debug {
+			debugCount++
+			logDocDebug(doc, debugCount)
+		}
+
+		best, bestScore := h.findDirectMatchDebug(doc, txns, consumed, aliases, isCOD, dateWindow, debug)
 		if best != nil && bestScore.Total >= matchThreshold {
 			if err := h.recordMatch(db, doc, *best, bestScore, "auto"); err != nil {
 				errors = append(errors, err.Error())
@@ -561,8 +568,22 @@ func (h *MatchingEngineHandler) findDirectMatch(
 	doc wfDoc, txns []plaidTx, consumed map[string]bool,
 	aliases map[string][]vendorAlias, isCOD bool, dateWindow int,
 ) (*plaidTx, scoreBreakdown) {
+	return h.findDirectMatchDebug(doc, txns, consumed, aliases, isCOD, dateWindow, false)
+}
+
+func (h *MatchingEngineHandler) findDirectMatchDebug(
+	doc wfDoc, txns []plaidTx, consumed map[string]bool,
+	aliases map[string][]vendorAlias, isCOD bool, dateWindow int, debug bool,
+) (*plaidTx, scoreBreakdown) {
 	var bestTx *plaidTx
 	var bestScore scoreBreakdown
+
+	// For debug: collect top 3 candidates
+	type debugCandidate struct {
+		tx    plaidTx
+		score scoreBreakdown
+	}
+	var topCandidates []debugCandidate
 
 	for i := range txns {
 		tx := &txns[i]
@@ -570,6 +591,17 @@ func (h *MatchingEngineHandler) findDirectMatch(
 			continue
 		}
 		if !passesDateRule(doc, *tx, isCOD, dateWindow) {
+			if debug {
+				dayDiff := 0
+				if doc.DocDate.Valid && tx.TransactionDate.Valid {
+					dayDiff = int(doc.DocDate.Time.Sub(tx.TransactionDate.Time).Hours() / 24)
+				}
+				reason := "chrono_prefilter"
+				if isCOD {
+					reason = "cod_not_same_day"
+				}
+				log.Printf("[MatchEngine]   REJECTED tx=%s reason=%s date_diff=%d", tx.ID, reason, dayDiff)
+			}
 			continue
 		}
 		score := computeFullScore(doc, *tx, aliases)
@@ -577,8 +609,63 @@ func (h *MatchingEngineHandler) findDirectMatch(
 			bestScore = score
 			bestTx = tx
 		}
+
+		if debug {
+			// Insert into top 3 sorted by total desc
+			topCandidates = append(topCandidates, debugCandidate{tx: *tx, score: score})
+			sort.Slice(topCandidates, func(a, b int) bool {
+				return topCandidates[a].score.Total > topCandidates[b].score.Total
+			})
+			if len(topCandidates) > 3 {
+				topCandidates = topCandidates[:3]
+			}
+		}
 	}
+
+	if debug {
+		for rank, c := range topCandidates {
+			txDate := ""
+			if c.tx.TransactionDate.Valid {
+				txDate = c.tx.TransactionDate.Time.Format("2006-01-02")
+			}
+			txAmt := 0.0
+			if c.tx.Amount.Valid {
+				txAmt = c.tx.Amount.Float64
+			}
+			log.Printf("[MatchEngine]   #%d TX %s | merchant=%s | location=%s | date=%s | amount=%.2f | scores: amt=%.1f date=%.1f vendor=%.1f inv=%.1f loc=%.1f TOTAL=%.1f",
+				rank+1, c.tx.ID,
+				nullStr(c.tx.NormalizedMerch), nullStr(c.tx.LocationName),
+				txDate, txAmt,
+				c.score.Amount, c.score.Date, c.score.Vendor, c.score.Invoice, c.score.Location, c.score.Total)
+		}
+		if len(topCandidates) == 0 {
+			log.Printf("[MatchEngine]   (no candidates passed pre-filter)")
+		}
+	}
+
 	return bestTx, bestScore
+}
+
+func logDocDebug(doc wfDoc, n int) {
+	docDate := ""
+	if doc.DocDate.Valid {
+		docDate = doc.DocDate.Time.Format("2006-01-02")
+	}
+	docAmt := 0.0
+	if doc.Amount.Valid {
+		docAmt = doc.Amount.Float64
+	}
+	log.Printf("[MatchEngine] DOC #%d %s | vendor=%s | location=%s | date=%s | amount=%.2f | type=%s",
+		n, doc.ID,
+		nullStr(doc.VendorNorm), nullStr(doc.LocationName),
+		docDate, docAmt, nullStr(doc.DocType))
+}
+
+func nullStr(ns sql.NullString) string {
+	if ns.Valid {
+		return ns.String
+	}
+	return "<null>"
 }
 
 // ── Statement weekly vendor matching ────────────────────────────
