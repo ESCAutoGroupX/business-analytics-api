@@ -124,6 +124,22 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 		log.Printf("[MatchEngine] RSR vendor UPDATE error: %v", err)
 	}
 
+	// ── IMC Parts Authority aliases ─────────────────────────────
+	db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source)
+		SELECT gen_random_uuid(), v.id, 'parts authority', 'manual'
+		FROM vendors v WHERE v.normalized_name = 'imc parts authority'
+		ON CONFLICT DO NOTHING`)
+
+	// ── SSF Auto Parts aliases ──────────────────────────────────
+	db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source)
+		SELECT gen_random_uuid(), v.id, 'ssf imported auto parts', 'manual'
+		FROM vendors v WHERE v.normalized_name = 'ssf auto parts'
+		ON CONFLICT DO NOTHING`)
+	db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source)
+		SELECT gen_random_uuid(), v.id, 'ssf imported auto pasouth', 'manual'
+		FROM vendors v WHERE v.normalized_name = 'ssf auto parts'
+		ON CONFLICT DO NOTHING`)
+
 	h.logTableColumns(db, "wf_documents")
 	h.logTableColumns(db, "vendors")
 
