@@ -181,7 +181,18 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 			isMultiPay := p.RepDoc.MultiPayment.Valid && p.RepDoc.MultiPayment.Bool
 
 			// Step 2: Find transactions by amount (amount-first lookup)
+			if i < 3 {
+				windowStart := p.PeriodStart.AddDate(0, 0, -3)
+				windowEnd := p.PeriodEnd.AddDate(0, 0, 16)
+				log.Printf("[MatchEngine] Looking for txns: vendor=%s amount=%.2f window=%s to %s (periodStart=%s periodEnd=%s)",
+					p.VendorNorm, periodTotal,
+					windowStart.Format("2006-01-02"), windowEnd.Format("2006-01-02"),
+					p.PeriodStart.Format("2006-01-02"), p.PeriodEnd.Format("2006-01-02"))
+			}
 			txns := h.loadTxnsByAmount(db, periodTotal, p.PeriodStart, p.PeriodEnd, p.VendorNorm, aliases, p.RepDoc)
+			if i < 3 {
+				log.Printf("[MatchEngine] Found %d candidate txns for period (vendor=%s amount=%.2f)", len(txns), p.VendorNorm, periodTotal)
+			}
 
 			if !isMultiPay {
 				// Step 3a: Single-payment match — find ONE transaction matching period total
