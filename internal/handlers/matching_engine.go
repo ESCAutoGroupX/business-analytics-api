@@ -109,6 +109,9 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	db.Exec(`ALTER TABLE match_results ADD CONSTRAINT match_results_match_type_check CHECK (match_type IN ('auto', 'manual', 'ai_tiebreak', 'auto_multi_pay', 'auto_multi_pay_partial', 'auto_statement_group'))`)
 	db.Exec(`ALTER TABLE statement_periods DROP CONSTRAINT IF EXISTS statement_periods_status_check`)
 	db.Exec(`ALTER TABLE statement_periods ADD CONSTRAINT statement_periods_status_check CHECK (status IN ('open', 'reconciled', 'discrepancy', 'fully_matched', 'partial'))`)
+	db.Exec(`ALTER TABLE statement_periods ADD COLUMN IF NOT EXISTS location_name VARCHAR(100)`)
+	db.Exec(`DROP INDEX IF EXISTS idx_stmt_periods_vendor_start`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_stmt_periods_vendor_location_start ON statement_periods (vendor_id, location_name, period_start)`)
 
 	if _, err := db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source, location_name)
 		SELECT gen_random_uuid(), v.id, 'rsr auto parts', 'manual', 'Highlands'
@@ -148,6 +151,21 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 		// Step 1: Build period totals grouped by vendor + location + week
 		periods := buildStatementPeriods(stmtDocs)
 		log.Printf("[MatchEngine] Statement vendors: %d docs → %d periods", len(stmtDocs), len(periods))
+
+		// Log first few periods as samples
+		for i, sp := range periods {
+			if i >= 3 {
+				break
+			}
+			total := sp.NetTotal
+			if sp.StmtAmount > 0 {
+				total = sp.StmtAmount
+			}
+			log.Printf("[MatchEngine] Sample period: vendor=%s location=%s period=%s to %s invTotal=%.2f creditTotal=%.2f net=%.2f stmtAmt=%.2f expected=%.2f docs=%d",
+				sp.VendorNorm, sp.Location,
+				sp.PeriodStart.Format("2006-01-02"), sp.PeriodEnd.Format("2006-01-02"),
+				sp.InvTotal, sp.CreditTotal, sp.NetTotal, sp.StmtAmount, total, len(sp.Docs))
+		}
 
 		for i := range periods {
 			p := &periods[i]
@@ -189,7 +207,7 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 					if periodTotal > 0 && math.Abs(txAmt-periodTotal)/periodTotal > 0.01 {
 						status = "partial"
 					}
-					h.upsertStatementPeriod(db, p.VendorID, p.PeriodStart, p.PeriodEnd, periodTotal, txAmt, status)
+					h.upsertStatementPeriod(db, p.VendorID, p.Location, p.PeriodStart, p.PeriodEnd, periodTotal, txAmt, status)
 				} else {
 					totalUnmatched += len(p.Docs)
 				}
@@ -638,7 +656,7 @@ func (h *MatchingEngineHandler) matchMultiPayPeriod(
 		if periodTotal > 0 && math.Abs(txAmt-periodTotal)/periodTotal > 0.01 {
 			status = "partial"
 		}
-		h.upsertStatementPeriod(db, p.VendorID, p.PeriodStart, p.PeriodEnd, periodTotal, txAmt, status)
+		h.upsertStatementPeriod(db, p.VendorID, p.Location, p.PeriodStart, p.PeriodEnd, periodTotal, txAmt, status)
 	} else {
 		unmatched = len(p.Docs)
 	}
@@ -1052,29 +1070,32 @@ func computeFullScore(doc wfDoc, tx plaidTx, aliases map[string][]vendorAlias) s
 // STATEMENT PERIODS TRACKING
 // ═══════════════════════════════════════════════════════════════
 
-func (h *MatchingEngineHandler) upsertStatementPeriod(db *sql.DB, vendorID string, periodStart, periodEnd time.Time, expectedTotal, matchedTotal float64, status string) {
+func (h *MatchingEngineHandler) upsertStatementPeriod(db *sql.DB, vendorID, locationName string, periodStart, periodEnd time.Time, expectedTotal, matchedTotal float64, status string) {
 	if vendorID == "" {
 		return
 	}
+	if locationName == "" {
+		locationName = "Unknown"
+	}
 	_, err := db.Exec(`
-		INSERT INTO statement_periods (id, vendor_id, period_start, period_end, expected_total, matched_total, status, created_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
-		ON CONFLICT (vendor_id, period_start) DO UPDATE SET
+		INSERT INTO statement_periods (id, vendor_id, location_name, period_start, period_end, expected_total, matched_total, status, created_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
+		ON CONFLICT (vendor_id, location_name, period_start) DO UPDATE SET
 			expected_total = EXCLUDED.expected_total,
 			matched_total = EXCLUDED.matched_total,
 			status = EXCLUDED.status`,
-		vendorID, periodStart, periodEnd, expectedTotal, matchedTotal, status)
+		vendorID, locationName, periodStart, periodEnd, expectedTotal, matchedTotal, status)
 	if err != nil {
 		log.Printf("[MatchEngine] upsert statement_period error: %v", err)
-		db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_stmt_periods_vendor_start ON statement_periods (vendor_id, period_start)`)
+		db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_stmt_periods_vendor_location_start ON statement_periods (vendor_id, location_name, period_start)`)
 		db.Exec(`
-			INSERT INTO statement_periods (id, vendor_id, period_start, period_end, expected_total, matched_total, status, created_at)
-			VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
-			ON CONFLICT (vendor_id, period_start) DO UPDATE SET
+			INSERT INTO statement_periods (id, vendor_id, location_name, period_start, period_end, expected_total, matched_total, status, created_at)
+			VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
+			ON CONFLICT (vendor_id, location_name, period_start) DO UPDATE SET
 				expected_total = EXCLUDED.expected_total,
 				matched_total = EXCLUDED.matched_total,
 				status = EXCLUDED.status`,
-			vendorID, periodStart, periodEnd, expectedTotal, matchedTotal, status)
+			vendorID, locationName, periodStart, periodEnd, expectedTotal, matchedTotal, status)
 	}
 }
 
