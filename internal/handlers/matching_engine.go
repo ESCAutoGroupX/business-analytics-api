@@ -81,36 +81,32 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	db.Exec(`ALTER TABLE vendor_aliases ADD COLUMN IF NOT EXISTS location_name VARCHAR`)
 	db.Exec(`ALTER TABLE match_results DROP CONSTRAINT IF EXISTS match_results_match_type_check`)
 	db.Exec(`ALTER TABLE match_results ADD CONSTRAINT match_results_match_type_check CHECK (match_type IN ('auto', 'manual', 'ai_tiebreak', 'auto_multi_pay', 'auto_multi_pay_partial', 'auto_statement_group'))`)
+	db.Exec(`ALTER TABLE statement_periods DROP CONSTRAINT IF EXISTS statement_periods_status_check`)
+	db.Exec(`ALTER TABLE statement_periods ADD CONSTRAINT statement_periods_status_check CHECK (status IN ('open', 'reconciled', 'discrepancy', 'fully_matched', 'partial'))`)
 
 	// ── Log wf_documents schema for diagnostics ─────────────────
 	h.logTableColumns(db, "wf_documents")
 
-	// ── Link wf_documents to vendors by normalized name ─────────
-	res1, _ := db.Exec(`
-		UPDATE wf_documents wd
-		SET vendor_id = v.id
-		FROM vendors v
-		WHERE wd.vendor_id IS NULL
-		AND LOWER(TRIM(wd.vendor_name)) = v.normalized_name`)
-	if res1 != nil {
-		n, _ := res1.RowsAffected()
-		if n > 0 {
-			log.Printf("[MatchEngine] Linked %d documents to vendors by normalized name", n)
-		}
-	}
+	// ── Link wf_documents to vendors (handles both vendor_name and vendor columns) ──
+	db.Exec(`DO $$
+	BEGIN
+		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='wf_documents' AND column_name='vendor_name') THEN
+			UPDATE wf_documents wd SET vendor_id = v.id FROM vendors v
+			WHERE wd.vendor_id IS NULL AND LOWER(TRIM(wd.vendor_name)) = v.normalized_name;
+			UPDATE wf_documents wd SET vendor_id = va.vendor_id FROM vendor_aliases va
+			WHERE wd.vendor_id IS NULL AND LOWER(TRIM(wd.vendor_name)) = LOWER(TRIM(va.alias));
+		ELSIF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='wf_documents' AND column_name='vendor') THEN
+			UPDATE wf_documents wd SET vendor_id = v.id FROM vendors v
+			WHERE wd.vendor_id IS NULL AND LOWER(TRIM(wd.vendor)) = v.normalized_name;
+			UPDATE wf_documents wd SET vendor_id = va.vendor_id FROM vendor_aliases va
+			WHERE wd.vendor_id IS NULL AND LOWER(TRIM(wd.vendor)) = LOWER(TRIM(va.alias));
+		END IF;
+	END $$`)
 
-	res2, _ := db.Exec(`
-		UPDATE wf_documents wd
-		SET vendor_id = va.vendor_id
-		FROM vendor_aliases va
-		WHERE wd.vendor_id IS NULL
-		AND LOWER(TRIM(wd.vendor_name)) = LOWER(TRIM(va.alias))`)
-	if res2 != nil {
-		n, _ := res2.RowsAffected()
-		if n > 0 {
-			log.Printf("[MatchEngine] Linked %d documents to vendors by alias", n)
-		}
-	}
+	var linkedCount, unlinkedCount int
+	db.QueryRow(`SELECT COUNT(*) FROM wf_documents WHERE vendor_id IS NOT NULL`).Scan(&linkedCount)
+	db.QueryRow(`SELECT COUNT(*) FROM wf_documents WHERE vendor_id IS NULL`).Scan(&unlinkedCount)
+	log.Printf("[MatchEngine] Vendor linking: %d linked, %d unlinked", linkedCount, unlinkedCount)
 
 	// ── Load data ───────────────────────────────────────────────
 	docs, err := h.loadPendingDocs(db)
