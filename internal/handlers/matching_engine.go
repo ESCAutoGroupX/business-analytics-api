@@ -85,6 +85,14 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	db.Exec(`ALTER TABLE statement_periods DROP CONSTRAINT IF EXISTS statement_periods_status_check`)
 	db.Exec(`ALTER TABLE statement_periods ADD CONSTRAINT statement_periods_status_check CHECK (status IN ('open', 'reconciled', 'discrepancy', 'fully_matched', 'partial'))`)
 
+	// ── RSR Auto Parts alias for Carquest at Highlands ──────────
+	db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source, location_name)
+		SELECT gen_random_uuid(), v.id, 'rsr auto parts', 'manual', 'Highlands'
+		FROM vendors v WHERE v.normalized_name = 'carquest auto parts'
+		ON CONFLICT DO NOTHING`)
+	db.Exec(`UPDATE vendors SET vendor_type = 'statement', statement_frequency = 'weekly'
+		WHERE normalized_name = 'rsr auto parts'`)
+
 	// ── Log wf_documents schema for diagnostics ─────────────────
 	h.logTableColumns(db, "wf_documents")
 	h.logTableColumns(db, "vendors")
@@ -126,6 +134,7 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	stmtWeeklyGroups := map[string][]wfDoc{} // vendorID → docs
 	multiPayGroups := map[string][]wfDoc{}    // vendorID → docs
 
+	loggedFirstStmt := false
 	for _, doc := range docs {
 		if isMultiPaymentVendor(doc) {
 			key := ""
@@ -139,10 +148,36 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 				key = doc.VendorID.String
 			}
 			stmtWeeklyGroups[key] = append(stmtWeeklyGroups[key], doc)
+			if !loggedFirstStmt {
+				loggedFirstStmt = true
+				log.Printf("[MatchEngine] First statement-weekly doc: id=%s vendorID=%s vendorNorm=%s isStmtVendor=%v stmtFreq=%s multiPay=%v",
+					doc.ID,
+					doc.VendorID.String, doc.VendorNorm.String,
+					doc.IsStatementVendor, doc.StmtFreq, doc.MultiPayment)
+			}
 		} else {
 			directDocs = append(directDocs, doc)
 		}
 	}
+
+	stmtWeeklyCount := 0
+	for _, g := range stmtWeeklyGroups {
+		stmtWeeklyCount += len(g)
+	}
+	multiPayCount := 0
+	for _, g := range multiPayGroups {
+		multiPayCount += len(g)
+	}
+	codCount := 0
+	for _, doc := range directDocs {
+		if isCODVendor(doc) {
+			codCount++
+		}
+	}
+	log.Printf("[MatchEngine] Classification: %d statement-weekly (%d vendors), %d multi-payment (%d vendors), %d direct (%d COD)",
+		stmtWeeklyCount, len(stmtWeeklyGroups),
+		multiPayCount, len(multiPayGroups),
+		len(directDocs), codCount)
 
 	// ── 1. Statement weekly vendors: group by week, match sum ───
 	for vendorID, vendorDocs := range stmtWeeklyGroups {
@@ -602,19 +637,31 @@ func isMultiPaymentVendor(doc wfDoc) bool {
 }
 
 func isStatementWeekly(doc wfDoc) bool {
-	// Statement vendor: vendor_type = 'statement' with weekly frequency
-	isStmt := doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool
-	if !isStmt {
+	if !doc.StmtFreq.Valid || doc.StmtFreq.String == "" {
 		return false
 	}
-	if !doc.StmtFreq.Valid {
+	freq := strings.ToLower(strings.TrimSpace(doc.StmtFreq.String))
+	if freq != "weekly" {
 		return false
 	}
-	return strings.EqualFold(doc.StmtFreq.String, "weekly")
+	// Either vendor_type = 'statement' OR having a weekly frequency implies statement vendor
+	if doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool {
+		return true
+	}
+	// Fallback: weekly frequency alone means statement vendor
+	return true
 }
 
 func isStatementVendor(doc wfDoc) bool {
-	return doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool
+	if doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool {
+		return true
+	}
+	// Also treat vendors with a non-COD statement_frequency as statement vendors
+	if doc.StmtFreq.Valid && doc.StmtFreq.String != "" {
+		freq := strings.ToLower(strings.TrimSpace(doc.StmtFreq.String))
+		return freq != "cod" && freq != ""
+	}
+	return false
 }
 
 func isCODVendor(doc wfDoc) bool {
