@@ -62,14 +62,27 @@ type scoreBreakdown struct {
 	Total    float64
 }
 
-// vendorAlias stores an alias with optional location scoping.
 type vendorAlias struct {
 	Alias        string
-	LocationName string // empty = global alias
+	LocationName string
+}
+
+// statementPeriod groups docs by vendor + location + week with a calculated total.
+type statementPeriod struct {
+	VendorID    string
+	VendorNorm  string
+	Location    string
+	PeriodStart time.Time
+	PeriodEnd   time.Time
+	InvTotal    float64 // sum of invoice amounts
+	CreditTotal float64 // sum of credit amounts
+	NetTotal    float64 // inv - credit
+	StmtAmount  float64 // from an actual statement doc if one exists, else 0
+	Docs        []wfDoc // all docs in this period
+	RepDoc      wfDoc   // representative doc for vendor/location scoring
 }
 
 const matchThreshold = 55.0 // TODO: raise back to 75 after tuning
-
 const docBatchSize = 500
 const txBatchLimit = 2000
 
@@ -97,7 +110,6 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	db.Exec(`ALTER TABLE statement_periods DROP CONSTRAINT IF EXISTS statement_periods_status_check`)
 	db.Exec(`ALTER TABLE statement_periods ADD CONSTRAINT statement_periods_status_check CHECK (status IN ('open', 'reconciled', 'discrepancy', 'fully_matched', 'partial'))`)
 
-	// ── RSR Auto Parts alias for Carquest at Highlands ──────────
 	if _, err := db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source, location_name)
 		SELECT gen_random_uuid(), v.id, 'rsr auto parts', 'manual', 'Highlands'
 		FROM vendors v WHERE v.normalized_name = 'carquest auto parts'
@@ -109,7 +121,6 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 		log.Printf("[MatchEngine] RSR vendor UPDATE error: %v", err)
 	}
 
-	// ── Log diagnostics ─────────────────────────────────────────
 	h.logTableColumns(db, "wf_documents")
 	h.logTableColumns(db, "vendors")
 
@@ -118,22 +129,8 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	db.QueryRow(`SELECT COUNT(*) FROM wf_documents WHERE vendor_id IS NULL`).Scan(&unlinkedCount)
 	log.Printf("[MatchEngine] Vendor coverage: %d linked, %d unlinked", linkedCount, unlinkedCount)
 
-	// ── Load aliases (small, load once) ─────────────────────────
 	aliases := h.loadVendorAliases(db)
 
-	// ── Count total pending docs for progress ───────────────────
-	var totalPending int
-	db.QueryRow(`SELECT COUNT(*) FROM wf_documents
-		WHERE match_status = 'pending' AND doc_date > '2020-01-01'
-		AND vendor_id IS NOT NULL AND amount IS NOT NULL`).Scan(&totalPending)
-
-	totalBatches := (totalPending + docBatchSize - 1) / docBatchSize
-	if totalBatches == 0 {
-		totalBatches = 1
-	}
-	log.Printf("[MatchEngine] Total pending docs: %d (%d batches of %d)", totalPending, totalBatches, docBatchSize)
-
-	// ── Global consumed set (transaction IDs matched across all batches) ──
 	consumed := map[string]bool{}
 	totalMatched := 0
 	totalUnmatched := 0
@@ -141,55 +138,44 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	totalMultiPay := 0
 	var allErrors []string
 
-	// ── Process statement vendors first (group by vendor_id) ────
+	// ═══════════════════════════════════════════════════════════════
+	// PHASE 1: STATEMENT VENDORS — amount-first matching
+	// ═══════════════════════════════════════════════════════════════
 	stmtDocs, err := h.loadStatementVendorDocs(db)
 	if err != nil {
 		log.Printf("[MatchEngine] load statement docs error: %v", err)
 	} else if len(stmtDocs) > 0 {
-		stmtWeeklyGroups := map[string][]wfDoc{}
-		multiPayGroups := map[string][]wfDoc{}
+		// Step 1: Build period totals grouped by vendor + location + week
+		periods := buildStatementPeriods(stmtDocs)
+		log.Printf("[MatchEngine] Statement vendors: %d docs → %d periods", len(stmtDocs), len(periods))
 
-		for _, doc := range stmtDocs {
-			key := ""
-			if doc.VendorID.Valid {
-				key = doc.VendorID.String
+		for i := range periods {
+			p := &periods[i]
+			periodTotal := p.NetTotal
+			if p.StmtAmount > 0 {
+				periodTotal = p.StmtAmount // prefer actual statement amount
 			}
-			if isMultiPaymentVendor(doc) {
-				multiPayGroups[key] = append(multiPayGroups[key], doc)
-			} else {
-				stmtWeeklyGroups[key] = append(stmtWeeklyGroups[key], doc)
+			if periodTotal == 0 {
+				totalUnmatched += len(p.Docs)
+				continue
 			}
-		}
 
-		log.Printf("[MatchEngine] Statement vendors: %d weekly (%d vendors), %d multi-pay (%d vendors)",
-			len(stmtDocs)-func() int { n := 0; for _, g := range multiPayGroups { n += len(g) }; return n }(),
-			len(stmtWeeklyGroups),
-			func() int { n := 0; for _, g := range multiPayGroups { n += len(g) }; return n }(),
-			len(multiPayGroups))
+			isMultiPay := p.RepDoc.MultiPayment.Valid && p.RepDoc.MultiPayment.Bool
 
-		// Process each statement vendor with its own scoped transactions
-		for vendorID, vendorDocs := range stmtWeeklyGroups {
-			txns := h.loadTxnsForVendor(db, vendorDocs, vendorID, aliases)
-			weekBuckets := groupByWeek(vendorDocs)
-			for _, bucket := range weekBuckets {
-				weekSum := 0.0
-				for _, d := range bucket.docs {
-					if d.Amount.Valid {
-						weekSum += math.Abs(d.Amount.Float64)
-					}
-				}
-				if weekSum == 0 {
-					continue
-				}
-				bestTx, bestScore := h.findStatementMatch(vendorID, bucket.docs, weekSum, bucket.periodEnd, txns, consumed, aliases)
+			// Step 2: Find transactions by amount (amount-first lookup)
+			txns := h.loadTxnsByAmount(db, periodTotal, p.PeriodStart, p.PeriodEnd, p.VendorNorm, aliases, p.RepDoc)
+
+			if !isMultiPay {
+				// Step 3a: Single-payment match — find ONE transaction matching period total
+				bestTx, bestScore := h.scorePeriodCandidates(p, periodTotal, txns, consumed, aliases)
 				if bestTx != nil && bestScore.Total >= matchThreshold {
-					for _, d := range bucket.docs {
-						perDocScore := scoreBreakdown{
+					for _, d := range p.Docs {
+						docScore := scoreBreakdown{
 							Amount: bestScore.Amount, Date: bestScore.Date,
-							Vendor: bestScore.Vendor, Location: bestScore.Location,
-							Total: bestScore.Total,
+							Vendor: bestScore.Vendor, Invoice: bestScore.Invoice,
+							Location: bestScore.Location, Total: bestScore.Total,
 						}
-						if err := h.recordMatch(db, d, *bestTx, perDocScore, "auto_statement_group"); err != nil {
+						if err := h.recordMatch(db, d, *bestTx, docScore, "auto_statement_group"); err != nil {
 							allErrors = append(allErrors, err.Error())
 						} else {
 							totalMatched++
@@ -197,54 +183,52 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 						}
 					}
 					consumed[bestTx.ID] = true
-					h.upsertStatementPeriod(db, vendorID, bucket.periodStart, bucket.periodEnd, weekSum, weekSum)
-				} else {
-					totalUnmatched += len(bucket.docs)
-				}
-			}
-		}
 
-		for vendorID, vendorDocs := range multiPayGroups {
-			txns := h.loadTxnsForVendor(db, vendorDocs, vendorID, aliases)
-			weekBuckets := groupByWeek(vendorDocs)
-			for _, bucket := range weekBuckets {
-				periodTotal := 0.0
-				for _, d := range bucket.docs {
-					if d.Amount.Valid {
-						periodTotal += math.Abs(d.Amount.Float64)
+					txAmt := math.Abs(bestTx.Amount.Float64)
+					status := "reconciled"
+					if periodTotal > 0 && math.Abs(txAmt-periodTotal)/periodTotal > 0.01 {
+						status = "partial"
 					}
+					h.upsertStatementPeriod(db, p.VendorID, p.PeriodStart, p.PeriodEnd, periodTotal, txAmt, status)
+				} else {
+					totalUnmatched += len(p.Docs)
 				}
-				m, u, errs := h.matchMultiPaymentPeriod(db, vendorID, bucket, txns, consumed, aliases)
+			} else {
+				// Step 3b: Multi-payment (AmEx) — find transactions that sum to period total
+				m, u, errs := h.matchMultiPayPeriod(db, p, periodTotal, txns, consumed, aliases)
 				totalMatched += m
 				totalMultiPay += m
 				totalUnmatched += u
 				allErrors = append(allErrors, errs...)
-
-				matchedAmt := 0.0
-				for _, d := range bucket.docs {
-					if d.Amount.Valid {
-						var ms sql.NullString
-						db.QueryRow(`SELECT match_status FROM wf_documents WHERE id = $1`, d.ID).Scan(&ms)
-						if ms.Valid && ms.String == "matched" {
-							matchedAmt += math.Abs(d.Amount.Float64)
-						}
-					}
-				}
-				h.upsertStatementPeriod(db, vendorID, bucket.periodStart, bucket.periodEnd, periodTotal, matchedAmt)
 			}
 		}
-
-		stmtDocs = nil // free memory
+		stmtDocs = nil
 	}
 
-	// ── Process direct/COD vendors in batches ───────────────────
+	// ═══════════════════════════════════════════════════════════════
+	// PHASE 2: DIRECT VENDORS — batched, amount-first per invoice
+	// ═══════════════════════════════════════════════════════════════
+	var totalPending int
+	db.QueryRow(`SELECT COUNT(*) FROM wf_documents d
+		LEFT JOIN vendors v ON v.id = d.vendor_id
+		WHERE d.match_status = 'pending' AND d.doc_date > '2020-01-01'
+		AND d.vendor_id IS NOT NULL AND d.amount IS NOT NULL
+		AND NOT (v.vendor_type = 'statement' OR COALESCE(v.multi_payment, false) = true
+		         OR LOWER(v.statement_frequency) = 'weekly')`).Scan(&totalPending)
+
+	totalBatches := (totalPending + docBatchSize - 1) / docBatchSize
+	if totalBatches == 0 {
+		totalBatches = 1
+	}
+	log.Printf("[MatchEngine] Direct vendors: %d pending docs (%d batches)", totalPending, totalBatches)
+
 	batchNum := 0
 	offset := 0
 	for {
 		batchNum++
-		docs, err := h.loadDocBatch(db, docBatchSize, offset)
+		docs, err := h.loadDirectDocBatch(db, docBatchSize, offset)
 		if err != nil {
-			log.Printf("[MatchEngine] batch %d load docs error: %v", batchNum, err)
+			log.Printf("[MatchEngine] batch %d load error: %v", batchNum, err)
 			allErrors = append(allErrors, err.Error())
 			break
 		}
@@ -252,32 +236,23 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 			break
 		}
 
-		// Determine date range for this batch
 		minDate, maxDate := batchDateRange(docs)
-
-		// Load transactions scoped to this batch's date range
 		txns, err := h.loadTxnsForDateRange(db, minDate, maxDate)
 		if err != nil {
-			log.Printf("[MatchEngine] batch %d load txns error: %v", batchNum, err)
+			log.Printf("[MatchEngine] batch %d txn load error: %v", batchNum, err)
 			allErrors = append(allErrors, err.Error())
 			break
 		}
 
-		log.Printf("[MatchEngine] Batch %d/%d: processing docs %d-%d, loaded %d transactions",
+		log.Printf("[MatchEngine] Batch %d/%d: docs %d-%d, %d transactions",
 			batchNum, totalBatches, offset+1, offset+len(docs), len(txns))
 
 		for _, doc := range docs {
-			// Skip statement/multi-pay docs (already processed above)
-			if isStatementWeekly(doc) || isMultiPaymentVendor(doc) {
-				continue
-			}
-
 			isCOD := isCODVendor(doc)
 			dateWindow := 3
 			if isCOD {
 				dateWindow = 0
 			}
-
 			best, bestScore := h.findDirectMatch(doc, txns, consumed, aliases, isCOD, dateWindow)
 			if best != nil && bestScore.Total >= matchThreshold {
 				if err := h.recordMatch(db, doc, *best, bestScore, "auto"); err != nil {
@@ -293,7 +268,7 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 
 		offset += len(docs)
 		if len(docs) < docBatchSize {
-			break // last batch
+			break
 		}
 	}
 
@@ -369,7 +344,371 @@ func (h *MatchingEngineHandler) logTableColumns(db *sql.DB, tableName string) {
 	log.Printf("[MatchEngine] %s columns: %s", tableName, strings.Join(cols, ", "))
 }
 
-// ── Batched data loaders ────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// STATEMENT PERIOD BUILDING
+// ═══════════════════════════════════════════════════════════════
+
+// buildStatementPeriods groups statement vendor docs by vendor_id + location + week,
+// calculates net totals (invoices - credits), and checks for actual statement docs.
+func buildStatementPeriods(docs []wfDoc) []statementPeriod {
+	type key struct {
+		VendorID string
+		Location string
+		WeekKey  string
+	}
+	buckets := map[key]*statementPeriod{}
+
+	for _, d := range docs {
+		if !d.DocDate.Valid || !d.VendorID.Valid {
+			continue
+		}
+		monday := weekStart(d.DocDate.Time)
+		loc := ""
+		if d.LocationName.Valid {
+			loc = d.LocationName.String
+		}
+		k := key{VendorID: d.VendorID.String, Location: loc, WeekKey: monday.Format("2006-01-02")}
+
+		p, ok := buckets[k]
+		if !ok {
+			vn := ""
+			if d.VendorNorm.Valid {
+				vn = d.VendorNorm.String
+			}
+			p = &statementPeriod{
+				VendorID:    d.VendorID.String,
+				VendorNorm:  vn,
+				Location:    loc,
+				PeriodStart: monday,
+				PeriodEnd:   monday.AddDate(0, 0, 6),
+				RepDoc:      d,
+			}
+			buckets[k] = p
+		}
+		p.Docs = append(p.Docs, d)
+
+		if !d.Amount.Valid {
+			continue
+		}
+		amt := math.Abs(d.Amount.Float64)
+		docType := ""
+		if d.DocType.Valid {
+			docType = strings.ToUpper(d.DocType.String)
+		}
+
+		switch docType {
+		case "CREDIT", "CREDIT_MEMO", "RMA":
+			p.CreditTotal += amt
+		case "STATEMENT":
+			p.StmtAmount = amt // use statement amount if available
+		default:
+			p.InvTotal += amt
+		}
+	}
+
+	result := make([]statementPeriod, 0, len(buckets))
+	for _, p := range buckets {
+		p.NetTotal = p.InvTotal - p.CreditTotal
+		if p.NetTotal < 0 {
+			p.NetTotal = 0
+		}
+		result = append(result, *p)
+	}
+	return result
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AMOUNT-FIRST TRANSACTION LOADING
+// ═══════════════════════════════════════════════════════════════
+
+// loadTxnsByAmount finds transactions by amount match (within 1%) for a period total.
+// Date window: period_start - 3 to period_end + 16.
+func (h *MatchingEngineHandler) loadTxnsByAmount(
+	db *sql.DB, periodTotal float64,
+	periodStart, periodEnd time.Time,
+	vendorNorm string, aliases map[string][]vendorAlias, repDoc wfDoc,
+) []plaidTx {
+	from := periodStart.AddDate(0, 0, -3).Format("2006-01-02")
+	to := periodEnd.AddDate(0, 0, 16).Format("2006-01-02")
+	amtLow := periodTotal * 0.99
+	amtHigh := periodTotal * 1.01
+
+	// Build vendor LIKE patterns
+	var patterns []string
+	if vendorNorm != "" {
+		patterns = append(patterns, strings.ToLower(strings.TrimSpace(vendorNorm)))
+	}
+	if repDoc.VendorID.Valid {
+		for _, a := range aliases[repDoc.VendorID.String] {
+			patterns = append(patterns, a.Alias)
+		}
+	}
+
+	// Query: amount within 1% AND date in window AND vendor match
+	var args []interface{}
+	args = append(args, from, to, amtLow, amtHigh) // $1-$4
+
+	vendorCond := "true" // no vendor filter if no patterns
+	if len(patterns) > 0 {
+		var likeConds []string
+		for _, p := range patterns {
+			args = append(args, "%"+p+"%")
+			likeConds = append(likeConds, fmt.Sprintf("normalized_merchant LIKE $%d", len(args)))
+		}
+		vendorCond = "(" + strings.Join(likeConds, " OR ") + ")"
+	}
+
+	args = append(args, txBatchLimit)
+	limitIdx := len(args)
+
+	query := fmt.Sprintf(`
+		SELECT id, location_name, transaction_date, amount,
+		       description, merchant_name, normalized_merchant
+		FROM plaid_transactions
+		WHERE match_status = 'pending'
+		  AND transaction_date BETWEEN $1 AND $2
+		  AND (ABS(amount) BETWEEN $3 AND $4)
+		  AND %s
+		ORDER BY ABS(ABS(amount) - %f) ASC
+		LIMIT $%d`, vendorCond, periodTotal, limitIdx)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		log.Printf("[MatchEngine] loadTxnsByAmount error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	txns, _ := scanTxns(rows)
+	return txns
+}
+
+// loadTxnsByAmountMulti loads ALL vendor-matching transactions in the date window
+// (not filtered by amount) for multi-payment summing.
+func (h *MatchingEngineHandler) loadTxnsByAmountMulti(
+	db *sql.DB, periodStart, periodEnd time.Time,
+	vendorNorm string, aliases map[string][]vendorAlias, repDoc wfDoc,
+) []plaidTx {
+	from := periodStart.AddDate(0, 0, -3).Format("2006-01-02")
+	to := periodEnd.AddDate(0, 0, 16).Format("2006-01-02")
+
+	var patterns []string
+	if vendorNorm != "" {
+		patterns = append(patterns, strings.ToLower(strings.TrimSpace(vendorNorm)))
+	}
+	if repDoc.VendorID.Valid {
+		for _, a := range aliases[repDoc.VendorID.String] {
+			patterns = append(patterns, a.Alias)
+		}
+	}
+
+	var args []interface{}
+	args = append(args, from, to) // $1, $2
+
+	vendorCond := "true"
+	if len(patterns) > 0 {
+		var likeConds []string
+		for _, p := range patterns {
+			args = append(args, "%"+p+"%")
+			likeConds = append(likeConds, fmt.Sprintf("normalized_merchant LIKE $%d", len(args)))
+		}
+		vendorCond = "(" + strings.Join(likeConds, " OR ") + ")"
+	}
+
+	args = append(args, txBatchLimit)
+	limitIdx := len(args)
+
+	query := fmt.Sprintf(`
+		SELECT id, location_name, transaction_date, amount,
+		       description, merchant_name, normalized_merchant
+		FROM plaid_transactions
+		WHERE match_status = 'pending'
+		  AND transaction_date BETWEEN $1 AND $2
+		  AND %s
+		ORDER BY transaction_date ASC
+		LIMIT $%d`, vendorCond, limitIdx)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		log.Printf("[MatchEngine] loadTxnsByAmountMulti error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	txns, _ := scanTxns(rows)
+	return txns
+}
+
+// ═══════════════════════════════════════════════════════════════
+// STATEMENT SINGLE-PAYMENT MATCHING
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) scorePeriodCandidates(
+	p *statementPeriod, periodTotal float64,
+	txns []plaidTx, consumed map[string]bool, aliases map[string][]vendorAlias,
+) (*plaidTx, scoreBreakdown) {
+	var bestTx *plaidTx
+	var bestScore scoreBreakdown
+
+	for i := range txns {
+		tx := &txns[i]
+		if consumed[tx.ID] || !tx.Amount.Valid || !tx.TransactionDate.Valid {
+			continue
+		}
+
+		txAmt := math.Abs(tx.Amount.Float64)
+		s := scoreBreakdown{
+			Amount:   scoreAmount(periodTotal, txAmt),
+			Date:     scoreDate(p.PeriodEnd, tx.TransactionDate.Time),
+			Vendor:   scoreVendorWithAliases(p.RepDoc, *tx, aliases),
+			Location: scoreLocationMatch(p.RepDoc, *tx),
+		}
+		// Invoice count bonus: 10 pts if period has more than 1 doc
+		if len(p.Docs) > 1 {
+			s.Invoice = 10
+		}
+		s.Total = s.Amount + s.Date + s.Vendor + s.Invoice + s.Location
+
+		if s.Total > bestScore.Total {
+			bestScore = s
+			bestTx = tx
+		}
+	}
+	return bestTx, bestScore
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MULTI-PAYMENT MATCHING (AmEx pattern)
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) matchMultiPayPeriod(
+	db *sql.DB, p *statementPeriod, periodTotal float64,
+	txns []plaidTx, consumed map[string]bool, aliases map[string][]vendorAlias,
+) (matched int, unmatched int, errors []string) {
+	if len(txns) == 0 {
+		// Load all vendor transactions in the window (not amount-filtered)
+		txns = h.loadTxnsByAmountMulti(db, p.PeriodStart, p.PeriodEnd, p.VendorNorm, aliases, p.RepDoc)
+	}
+
+	// Filter to unconsumed vendor-matching candidates
+	var candidates []plaidTx
+	for i := range txns {
+		tx := &txns[i]
+		if consumed[tx.ID] || !tx.Amount.Valid {
+			continue
+		}
+		if scoreVendorWithAliases(p.RepDoc, *tx, aliases) >= 25 {
+			candidates = append(candidates, *tx)
+		}
+	}
+
+	// Try to find subset of transactions that sums to period total within 1%
+	sumMatched, matchedTxIDs := findSumMatch(candidates, periodTotal)
+
+	if sumMatched {
+		// Mark all matching transactions
+		for _, txID := range matchedTxIDs {
+			consumed[txID] = true
+		}
+		// Mark all docs in this period as matched to the first transaction
+		firstTxID := matchedTxIDs[0]
+		for _, d := range p.Docs {
+			s := scoreBreakdown{Amount: 25, Date: 20, Vendor: 25, Location: 0, Total: 70}
+			s.Total = s.Amount + s.Date + s.Vendor + s.Invoice + s.Location
+			// Build a synthetic plaidTx for recording
+			synTx := plaidTx{ID: firstTxID}
+			if err := h.recordMatch(db, d, synTx, s, "auto_multi_pay"); err != nil {
+				errors = append(errors, err.Error())
+			} else {
+				matched++
+			}
+		}
+		// Mark all matched transactions
+		for _, txID := range matchedTxIDs {
+			db.Exec(`UPDATE plaid_transactions SET match_status = 'matched' WHERE id = $1`, txID)
+		}
+
+		txAmt := 0.0
+		for _, c := range candidates {
+			for _, mid := range matchedTxIDs {
+				if c.ID == mid && c.Amount.Valid {
+					txAmt += math.Abs(c.Amount.Float64)
+				}
+			}
+		}
+		status := "reconciled"
+		if periodTotal > 0 && math.Abs(txAmt-periodTotal)/periodTotal > 0.01 {
+			status = "partial"
+		}
+		h.upsertStatementPeriod(db, p.VendorID, p.PeriodStart, p.PeriodEnd, periodTotal, txAmt, status)
+	} else {
+		unmatched = len(p.Docs)
+	}
+	return
+}
+
+// findSumMatch tries to find a subset of transactions whose absolute amounts
+// sum to within 1% of target. Uses greedy accumulation sorted by amount desc.
+func findSumMatch(candidates []plaidTx, target float64) (bool, []string) {
+	if target <= 0 || len(candidates) == 0 {
+		return false, nil
+	}
+
+	// Sort by absolute amount descending
+	sorted := make([]plaidTx, len(candidates))
+	copy(sorted, candidates)
+	sort.Slice(sorted, func(i, j int) bool {
+		return math.Abs(sorted[i].Amount.Float64) > math.Abs(sorted[j].Amount.Float64)
+	})
+
+	var used []string
+	runningSum := 0.0
+	for _, tx := range sorted {
+		txAmt := math.Abs(tx.Amount.Float64)
+		if runningSum+txAmt <= target*1.01 {
+			runningSum += txAmt
+			used = append(used, tx.ID)
+		}
+		if runningSum >= target*0.99 {
+			break
+		}
+	}
+
+	if runningSum >= target*0.99 && runningSum <= target*1.01 {
+		return true, used
+	}
+	return false, nil
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DIRECT VENDOR MATCHING (batched)
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) findDirectMatch(
+	doc wfDoc, txns []plaidTx, consumed map[string]bool,
+	aliases map[string][]vendorAlias, isCOD bool, dateWindow int,
+) (*plaidTx, scoreBreakdown) {
+	var bestTx *plaidTx
+	var bestScore scoreBreakdown
+
+	for i := range txns {
+		tx := &txns[i]
+		if consumed[tx.ID] {
+			continue
+		}
+		if !passesDateRule(doc, *tx, isCOD, dateWindow) {
+			continue
+		}
+		score := computeFullScore(doc, *tx, aliases)
+		if score.Total > bestScore.Total {
+			bestScore = score
+			bestTx = tx
+		}
+	}
+	return bestTx, bestScore
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DATA LOADERS
+// ═══════════════════════════════════════════════════════════════
 
 const docSelectCols = `d.id, d.vendor_id, d.location_name, d.doc_type, d.doc_date,
 	d.amount, d.invoice_number, d.matched_rma_id, d.matched_credit_id,
@@ -391,33 +730,6 @@ func scanDoc(rows *sql.Rows) (wfDoc, error) {
 	return d, err
 }
 
-// loadDocBatch loads a batch of direct/COD docs (non-statement) with LIMIT/OFFSET.
-func (h *MatchingEngineHandler) loadDocBatch(db *sql.DB, limit, offset int) ([]wfDoc, error) {
-	query := fmt.Sprintf(`SELECT %s
-		FROM wf_documents d
-		LEFT JOIN vendors v ON v.id = d.vendor_id
-		WHERE %s
-		ORDER BY d.doc_date ASC
-		LIMIT $1 OFFSET $2`, docSelectCols, docBaseWhere)
-
-	rows, err := db.Query(query, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var docs []wfDoc
-	for rows.Next() {
-		d, err := scanDoc(rows)
-		if err != nil {
-			return nil, err
-		}
-		docs = append(docs, d)
-	}
-	return docs, rows.Err()
-}
-
-// loadStatementVendorDocs loads all pending docs for statement/multi-pay vendors.
 func (h *MatchingEngineHandler) loadStatementVendorDocs(db *sql.DB) ([]wfDoc, error) {
 	query := fmt.Sprintf(`SELECT %s
 		FROM wf_documents d
@@ -426,13 +738,11 @@ func (h *MatchingEngineHandler) loadStatementVendorDocs(db *sql.DB) ([]wfDoc, er
 		  AND (v.vendor_type = 'statement' OR COALESCE(v.multi_payment, false) = true
 		       OR LOWER(v.statement_frequency) = 'weekly')
 		ORDER BY d.doc_date ASC`, docSelectCols, docBaseWhere)
-
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var docs []wfDoc
 	for rows.Next() {
 		d, err := scanDoc(rows)
@@ -444,11 +754,34 @@ func (h *MatchingEngineHandler) loadStatementVendorDocs(db *sql.DB) ([]wfDoc, er
 	return docs, rows.Err()
 }
 
-// loadTxnsForDateRange loads pending transactions within a date window.
+func (h *MatchingEngineHandler) loadDirectDocBatch(db *sql.DB, limit, offset int) ([]wfDoc, error) {
+	query := fmt.Sprintf(`SELECT %s
+		FROM wf_documents d
+		LEFT JOIN vendors v ON v.id = d.vendor_id
+		WHERE %s
+		  AND NOT (v.vendor_type = 'statement' OR COALESCE(v.multi_payment, false) = true
+		           OR LOWER(v.statement_frequency) = 'weekly')
+		ORDER BY d.doc_date ASC
+		LIMIT $1 OFFSET $2`, docSelectCols, docBaseWhere)
+	rows, err := db.Query(query, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var docs []wfDoc
+	for rows.Next() {
+		d, err := scanDoc(rows)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, d)
+	}
+	return docs, rows.Err()
+}
+
 func (h *MatchingEngineHandler) loadTxnsForDateRange(db *sql.DB, minDate, maxDate time.Time) ([]plaidTx, error) {
 	from := minDate.AddDate(0, 0, -30).Format("2006-01-02")
 	to := maxDate.AddDate(0, 0, 30).Format("2006-01-02")
-
 	rows, err := db.Query(`
 		SELECT id, location_name, transaction_date, amount,
 		       description, merchant_name, normalized_merchant
@@ -462,94 +795,6 @@ func (h *MatchingEngineHandler) loadTxnsForDateRange(db *sql.DB, minDate, maxDat
 	}
 	defer rows.Close()
 	return scanTxns(rows)
-}
-
-// loadTxnsForVendor loads pending transactions scoped to a vendor's date range and name.
-func (h *MatchingEngineHandler) loadTxnsForVendor(db *sql.DB, docs []wfDoc, vendorID string, aliases map[string][]vendorAlias) []plaidTx {
-	if len(docs) == 0 {
-		return nil
-	}
-
-	minDate, maxDate := batchDateRange(docs)
-	from := minDate.AddDate(0, 0, -30).Format("2006-01-02")
-	to := maxDate.AddDate(0, 0, 30).Format("2006-01-02")
-
-	// Build vendor name patterns for WHERE clause
-	var patterns []string
-	for _, d := range docs {
-		if d.VendorNorm.Valid && d.VendorNorm.String != "" {
-			vn := strings.ToLower(strings.TrimSpace(d.VendorNorm.String))
-			patterns = append(patterns, vn)
-			break // all docs should share same vendor
-		}
-	}
-	for _, a := range aliases[vendorID] {
-		patterns = append(patterns, a.Alias)
-	}
-
-	if len(patterns) == 0 {
-		// No vendor name — load by date only
-		rows, err := db.Query(`
-			SELECT id, location_name, transaction_date, amount,
-			       description, merchant_name, normalized_merchant
-			FROM plaid_transactions
-			WHERE match_status = 'pending'
-			  AND transaction_date BETWEEN $1 AND $2
-			ORDER BY transaction_date ASC
-			LIMIT $3`, from, to, txBatchLimit)
-		if err != nil {
-			log.Printf("[MatchEngine] loadTxnsForVendor query error: %v", err)
-			return nil
-		}
-		defer rows.Close()
-		txns, _ := scanTxns(rows)
-		return txns
-	}
-
-	// Build LIKE conditions for vendor matching
-	var conds []string
-	var args []interface{}
-	args = append(args, from, to) // $1, $2
-	for i, p := range patterns {
-		argIdx := i + 3 // $3, $4, ...
-		conds = append(conds, fmt.Sprintf("normalized_merchant LIKE $%d", argIdx))
-		args = append(args, "%"+p+"%")
-	}
-	args = append(args, txBatchLimit) // last arg
-	limitIdx := len(args)
-
-	query := fmt.Sprintf(`
-		SELECT id, location_name, transaction_date, amount,
-		       description, merchant_name, normalized_merchant
-		FROM plaid_transactions
-		WHERE match_status = 'pending'
-		  AND transaction_date BETWEEN $1 AND $2
-		  AND (%s)
-		ORDER BY transaction_date ASC
-		LIMIT $%d`, strings.Join(conds, " OR "), limitIdx)
-
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		log.Printf("[MatchEngine] loadTxnsForVendor filtered query error: %v — falling back to date-only", err)
-		// Fallback: load by date only
-		rows2, err2 := db.Query(`
-			SELECT id, location_name, transaction_date, amount,
-			       description, merchant_name, normalized_merchant
-			FROM plaid_transactions
-			WHERE match_status = 'pending'
-			  AND transaction_date BETWEEN $1 AND $2
-			ORDER BY transaction_date ASC
-			LIMIT $3`, from, to, txBatchLimit)
-		if err2 != nil {
-			return nil
-		}
-		defer rows2.Close()
-		txns, _ := scanTxns(rows2)
-		return txns
-	}
-	defer rows.Close()
-	txns, _ := scanTxns(rows)
-	return txns
 }
 
 func scanTxns(rows *sql.Rows) ([]plaidTx, error) {
@@ -598,7 +843,49 @@ func batchDateRange(docs []wfDoc) (time.Time, time.Time) {
 	return minDate, maxDate
 }
 
-// ── Chronological pre-filters ───────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// CLASSIFICATION HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+func isStatementWeekly(doc wfDoc) bool {
+	if !doc.StmtFreq.Valid || doc.StmtFreq.String == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(doc.StmtFreq.String), "weekly")
+}
+
+func isStatementVendor(doc wfDoc) bool {
+	if doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool {
+		return true
+	}
+	if doc.StmtFreq.Valid && doc.StmtFreq.String != "" {
+		freq := strings.ToLower(strings.TrimSpace(doc.StmtFreq.String))
+		return freq != "cod" && freq != ""
+	}
+	return false
+}
+
+func isCODVendor(doc wfDoc) bool {
+	if isStatementVendor(doc) {
+		return false
+	}
+	if !doc.StmtFreq.Valid || strings.TrimSpace(doc.StmtFreq.String) == "" {
+		return true
+	}
+	return strings.EqualFold(doc.StmtFreq.String, "cod")
+}
+
+func weekStart(t time.Time) time.Time {
+	wd := int(t.Weekday())
+	if wd == 0 {
+		wd = 7
+	}
+	return t.AddDate(0, 0, -(wd - 1))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CHRONOLOGICAL PRE-FILTERS
+// ═══════════════════════════════════════════════════════════════
 
 func passesDateRule(doc wfDoc, tx plaidTx, isCOD bool, dateWindow int) bool {
 	if !doc.DocDate.Valid || !tx.TransactionDate.Valid {
@@ -607,15 +894,14 @@ func passesDateRule(doc wfDoc, tx plaidTx, isCOD bool, dateWindow int) bool {
 	docDate := doc.DocDate.Time
 	txDate := tx.TransactionDate.Time
 
-	docType := ""
-	if doc.DocType.Valid {
-		docType = strings.ToUpper(doc.DocType.String)
-	}
-
 	if isCOD {
 		return sameDay(docDate, txDate)
 	}
 
+	docType := ""
+	if doc.DocType.Valid {
+		docType = strings.ToUpper(doc.DocType.String)
+	}
 	switch docType {
 	case "INVOICE":
 		if txDate.Before(docDate) {
@@ -627,8 +913,6 @@ func passesDateRule(doc wfDoc, tx plaidTx, isCOD bool, dateWindow int) bool {
 		return true
 	case "CREDIT", "CREDIT_MEMO":
 		return !txDate.Before(docDate)
-	case "RMA":
-		return true
 	}
 	return true
 }
@@ -637,7 +921,9 @@ func sameDay(a, b time.Time) bool {
 	return a.Year() == b.Year() && a.YearDay() == b.YearDay()
 }
 
-// ── Scoring functions ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// SCORING FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
 
 func scoreAmount(docAmt, txAmt float64) float64 {
 	docAmt = math.Abs(docAmt)
@@ -693,7 +979,6 @@ func scoreVendorWithAliases(doc wfDoc, tx plaidTx, aliases map[string][]vendorAl
 	if txMerch == "" {
 		return 0
 	}
-
 	if doc.VendorNorm.Valid {
 		vnDoc := strings.ToLower(strings.TrimSpace(doc.VendorNorm.String))
 		if vnDoc != "" {
@@ -702,7 +987,6 @@ func scoreVendorWithAliases(doc wfDoc, tx plaidTx, aliases map[string][]vendorAl
 			}
 		}
 	}
-
 	if doc.VendorID.Valid {
 		docLoc := ""
 		if doc.LocationName.Valid {
@@ -719,7 +1003,6 @@ func scoreVendorWithAliases(doc wfDoc, tx plaidTx, aliases map[string][]vendorAl
 			}
 		}
 	}
-
 	return 0
 }
 
@@ -765,294 +1048,39 @@ func computeFullScore(doc wfDoc, tx plaidTx, aliases map[string][]vendorAlias) s
 	return s
 }
 
-// ── Direct vendor matching ──────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// STATEMENT PERIODS TRACKING
+// ═══════════════════════════════════════════════════════════════
 
-func (h *MatchingEngineHandler) findDirectMatch(
-	doc wfDoc, txns []plaidTx, consumed map[string]bool,
-	aliases map[string][]vendorAlias, isCOD bool, dateWindow int,
-) (*plaidTx, scoreBreakdown) {
-	var bestTx *plaidTx
-	var bestScore scoreBreakdown
-
-	for i := range txns {
-		tx := &txns[i]
-		if consumed[tx.ID] {
-			continue
-		}
-		if !passesDateRule(doc, *tx, isCOD, dateWindow) {
-			continue
-		}
-		score := computeFullScore(doc, *tx, aliases)
-		if score.Total > bestScore.Total {
-			bestScore = score
-			bestTx = tx
-		}
-	}
-	return bestTx, bestScore
-}
-
-// ── Statement weekly vendor matching ────────────────────────────
-
-type weekBucket struct {
-	periodStart time.Time
-	periodEnd   time.Time
-	docs        []wfDoc
-}
-
-func isMultiPaymentVendor(doc wfDoc) bool {
-	return doc.MultiPayment.Valid && doc.MultiPayment.Bool
-}
-
-func isStatementWeekly(doc wfDoc) bool {
-	if !doc.StmtFreq.Valid || doc.StmtFreq.String == "" {
-		return false
-	}
-	freq := strings.ToLower(strings.TrimSpace(doc.StmtFreq.String))
-	if freq != "weekly" {
-		return false
-	}
-	if doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool {
-		return true
-	}
-	return true // weekly frequency alone implies statement vendor
-}
-
-func isStatementVendor(doc wfDoc) bool {
-	if doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool {
-		return true
-	}
-	if doc.StmtFreq.Valid && doc.StmtFreq.String != "" {
-		freq := strings.ToLower(strings.TrimSpace(doc.StmtFreq.String))
-		return freq != "cod" && freq != ""
-	}
-	return false
-}
-
-func isCODVendor(doc wfDoc) bool {
-	if isStatementVendor(doc) {
-		return false
-	}
-	if !doc.StmtFreq.Valid || strings.TrimSpace(doc.StmtFreq.String) == "" {
-		return true
-	}
-	return strings.EqualFold(doc.StmtFreq.String, "cod")
-}
-
-func groupByWeek(docs []wfDoc) []weekBucket {
-	buckets := map[string]*weekBucket{}
-	for _, d := range docs {
-		if !d.DocDate.Valid {
-			continue
-		}
-		monday := weekStart(d.DocDate.Time)
-		key := monday.Format("2006-01-02")
-		b, ok := buckets[key]
-		if !ok {
-			sunday := monday.AddDate(0, 0, 6)
-			b = &weekBucket{periodStart: monday, periodEnd: sunday}
-			buckets[key] = b
-		}
-		b.docs = append(b.docs, d)
-	}
-	result := make([]weekBucket, 0, len(buckets))
-	for _, b := range buckets {
-		result = append(result, *b)
-	}
-	return result
-}
-
-func weekStart(t time.Time) time.Time {
-	wd := int(t.Weekday())
-	if wd == 0 {
-		wd = 7
-	}
-	return t.AddDate(0, 0, -(wd - 1))
-}
-
-func (h *MatchingEngineHandler) findStatementMatch(
-	vendorID string, docs []wfDoc, weekSum float64,
-	periodEnd time.Time, txns []plaidTx, consumed map[string]bool,
-	aliases map[string][]vendorAlias,
-) (*plaidTx, scoreBreakdown) {
-	rep := docs[0]
-	var bestTx *plaidTx
-	var bestScore scoreBreakdown
-
-	for i := range txns {
-		tx := &txns[i]
-		if consumed[tx.ID] || !tx.TransactionDate.Valid || !tx.Amount.Valid {
-			continue
-		}
-		txDate := tx.TransactionDate.Time
-		if txDate.Before(periodEnd) || txDate.After(periodEnd.AddDate(0, 0, 7)) {
-			continue
-		}
-		txAmt := math.Abs(tx.Amount.Float64)
-		if weekSum > 0 {
-			if math.Abs(txAmt-weekSum)/weekSum > 0.01 {
-				continue
-			}
-		}
-
-		s := scoreBreakdown{
-			Amount:   scoreAmount(weekSum, txAmt),
-			Date:     scoreDate(periodEnd, txDate),
-			Vendor:   scoreVendorWithAliases(rep, *tx, aliases),
-			Location: scoreLocationMatch(rep, *tx),
-		}
-		s.Total = s.Amount + s.Date + s.Vendor + s.Invoice + s.Location
-
-		if s.Total > bestScore.Total {
-			bestScore = s
-			bestTx = tx
-		}
-	}
-	return bestTx, bestScore
-}
-
-// ── Multi-payment / rolling statement matching (AmEx pattern) ───
-
-func (h *MatchingEngineHandler) matchMultiPaymentPeriod(
-	db *sql.DB, vendorID string, bucket weekBucket,
-	txns []plaidTx, consumed map[string]bool, aliases map[string][]vendorAlias,
-) (matched int, unmatched int, errors []string) {
-	if len(bucket.docs) == 0 {
-		return
-	}
-	rep := bucket.docs[0]
-
-	windowStart := bucket.periodStart
-	windowEnd := bucket.periodEnd.AddDate(0, 0, 16)
-
-	var candidates []plaidTx
-	for i := range txns {
-		tx := &txns[i]
-		if consumed[tx.ID] || !tx.TransactionDate.Valid || !tx.Amount.Valid {
-			continue
-		}
-		txDate := tx.TransactionDate.Time
-		if txDate.Before(windowStart) || txDate.After(windowEnd) {
-			continue
-		}
-		if scoreVendorWithAliases(rep, *tx, aliases) < 25 {
-			continue
-		}
-		candidates = append(candidates, *tx)
-	}
-
-	sortedDocs := make([]wfDoc, len(bucket.docs))
-	copy(sortedDocs, bucket.docs)
-	sort.Slice(sortedDocs, func(i, j int) bool {
-		ai, aj := 0.0, 0.0
-		if sortedDocs[i].Amount.Valid {
-			ai = math.Abs(sortedDocs[i].Amount.Float64)
-		}
-		if sortedDocs[j].Amount.Valid {
-			aj = math.Abs(sortedDocs[j].Amount.Float64)
-		}
-		return ai > aj
-	})
-
-	for _, doc := range sortedDocs {
-		if !doc.Amount.Valid || doc.Amount.Float64 == 0 {
-			unmatched++
-			continue
-		}
-		docAmt := math.Abs(doc.Amount.Float64)
-
-		bestIdx := -1
-		var bestScore scoreBreakdown
-		for ci, cand := range candidates {
-			if consumed[cand.ID] {
-				continue
-			}
-			txAmt := math.Abs(cand.Amount.Float64)
-			amtPctDiff := math.Abs(docAmt-txAmt) / docAmt
-			if amtPctDiff > 0.01 {
-				continue
-			}
-			s := computeFullScore(doc, cand, aliases)
-			if s.Total > bestScore.Total {
-				bestScore = s
-				bestIdx = ci
-			}
-		}
-
-		if bestIdx >= 0 && bestScore.Total >= matchThreshold {
-			cand := candidates[bestIdx]
-			if err := h.recordMatch(db, doc, cand, bestScore, "auto_multi_pay"); err != nil {
-				errors = append(errors, err.Error())
-			} else {
-				matched++
-				consumed[cand.ID] = true
-			}
-		} else {
-			matchedBySumming := h.tryPartialSumMatch(db, doc, docAmt, candidates, consumed, aliases)
-			if matchedBySumming {
-				matched++
-			} else {
-				unmatched++
-			}
-		}
-	}
-	return
-}
-
-func (h *MatchingEngineHandler) tryPartialSumMatch(
-	db *sql.DB, doc wfDoc, docAmt float64,
-	candidates []plaidTx, consumed map[string]bool,
-	aliases map[string][]vendorAlias,
-) bool {
-	for _, cand := range candidates {
-		if consumed[cand.ID] || !cand.Amount.Valid {
-			continue
-		}
-		txAmt := math.Abs(cand.Amount.Float64)
-		if docAmt > 0 && math.Abs(txAmt-docAmt)/docAmt <= 0.01 {
-			s := computeFullScore(doc, cand, aliases)
-			if s.Total >= matchThreshold {
-				if err := h.recordMatch(db, doc, cand, s, "auto_multi_pay_partial"); err != nil {
-					return false
-				}
-				consumed[cand.ID] = true
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ── statement_periods tracking ──────────────────────────────────
-
-func (h *MatchingEngineHandler) upsertStatementPeriod(db *sql.DB, vendorID string, periodStart, periodEnd time.Time, expectedTotal, matchedTotal float64) {
+func (h *MatchingEngineHandler) upsertStatementPeriod(db *sql.DB, vendorID string, periodStart, periodEnd time.Time, expectedTotal, matchedTotal float64, status string) {
 	if vendorID == "" {
 		return
 	}
 	_, err := db.Exec(`
 		INSERT INTO statement_periods (id, vendor_id, period_start, period_end, expected_total, matched_total, status, created_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5,
-			CASE WHEN $5 >= $4 * 0.98 THEN 'fully_matched' ELSE 'partial' END, NOW())
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
 		ON CONFLICT (vendor_id, period_start) DO UPDATE SET
 			expected_total = EXCLUDED.expected_total,
 			matched_total = EXCLUDED.matched_total,
-			status = CASE WHEN EXCLUDED.matched_total >= EXCLUDED.expected_total * 0.98 THEN 'fully_matched' ELSE 'partial' END`,
-		vendorID, periodStart, periodEnd, expectedTotal, matchedTotal)
+			status = EXCLUDED.status`,
+		vendorID, periodStart, periodEnd, expectedTotal, matchedTotal, status)
 	if err != nil {
 		log.Printf("[MatchEngine] upsert statement_period error: %v", err)
 		db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_stmt_periods_vendor_start ON statement_periods (vendor_id, period_start)`)
 		db.Exec(`
 			INSERT INTO statement_periods (id, vendor_id, period_start, period_end, expected_total, matched_total, status, created_at)
-			VALUES (gen_random_uuid(), $1, $2, $3, $4, $5,
-				CASE WHEN $5 >= $4 * 0.98 THEN 'fully_matched' ELSE 'partial' END, NOW())
+			VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
 			ON CONFLICT (vendor_id, period_start) DO UPDATE SET
 				expected_total = EXCLUDED.expected_total,
 				matched_total = EXCLUDED.matched_total,
-				status = CASE WHEN EXCLUDED.matched_total >= EXCLUDED.expected_total * 0.98 THEN 'fully_matched' ELSE 'partial' END`,
-			vendorID, periodStart, periodEnd, expectedTotal, matchedTotal)
+				status = EXCLUDED.status`,
+			vendorID, periodStart, periodEnd, expectedTotal, matchedTotal, status)
 	}
 }
 
-// ── Record match ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// RECORD MATCH
+// ═══════════════════════════════════════════════════════════════
 
 func (h *MatchingEngineHandler) recordMatch(db *sql.DB, doc wfDoc, tx plaidTx, score scoreBreakdown, matchType string) error {
 	now := time.Now()
