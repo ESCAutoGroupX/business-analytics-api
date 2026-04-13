@@ -183,6 +183,7 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 				sp.InvTotal, sp.CreditTotal, sp.NetTotal, sp.StmtAmount, total, len(sp.Docs))
 		}
 
+		debugCandCount := 0
 		for i := range periods {
 			p := &periods[i]
 			periodTotal := p.NetTotal
@@ -197,7 +198,7 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 			isMultiPay := p.RepDoc.MultiPayment.Valid && p.RepDoc.MultiPayment.Bool
 
 			// Step 2: Find transactions by amount (amount-first lookup)
-			if i < 3 {
+			if debugCandCount < 3 {
 				windowStart := p.PeriodStart.AddDate(0, 0, -3)
 				windowEnd := p.PeriodEnd.AddDate(0, 0, 16)
 				log.Printf("[MatchEngine] Looking for txns: vendor=%s amount=%.2f window=%s to %s (periodStart=%s periodEnd=%s)",
@@ -206,13 +207,27 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 					p.PeriodStart.Format("2006-01-02"), p.PeriodEnd.Format("2006-01-02"))
 			}
 			txns := h.loadTxnsByAmount(db, periodTotal, p.PeriodStart, p.PeriodEnd, p.VendorNorm, aliases, p.RepDoc)
-			if i < 3 {
+
+			debugThisPeriod := len(txns) > 0 && debugCandCount < 3
+			if debugThisPeriod {
+				debugCandCount++
 				log.Printf("[MatchEngine] Found %d candidate txns for period (vendor=%s amount=%.2f)", len(txns), p.VendorNorm, periodTotal)
 			}
 
 			if !isMultiPay {
 				// Step 3a: Single-payment match — find ONE transaction matching period total
-				bestTx, bestScore := h.scorePeriodCandidates(p, periodTotal, txns, consumed, aliases)
+				bestTx, bestScore := h.scorePeriodCandidates(p, periodTotal, txns, consumed, aliases, debugThisPeriod)
+				if debugThisPeriod {
+					if bestTx != nil && bestScore.Total >= matchThreshold {
+						log.Printf("[MatchEngine] Period result: MATCHED (score=%.1f vendor=%s amount=%.2f)", bestScore.Total, p.VendorNorm, periodTotal)
+					} else {
+						best := 0.0
+						if bestTx != nil {
+							best = bestScore.Total
+						}
+						log.Printf("[MatchEngine] Period result: NO MATCH (best=%.1f threshold=%.0f vendor=%s amount=%.2f)", best, matchThreshold, p.VendorNorm, periodTotal)
+					}
+				}
 				if bestTx != nil && bestScore.Total >= matchThreshold {
 					for _, d := range p.Docs {
 						docScore := scoreBreakdown{
@@ -589,6 +604,7 @@ func (h *MatchingEngineHandler) loadTxnsByAmountMulti(
 func (h *MatchingEngineHandler) scorePeriodCandidates(
 	p *statementPeriod, periodTotal float64,
 	txns []plaidTx, consumed map[string]bool, aliases map[string][]vendorAlias,
+	debug bool,
 ) (*plaidTx, scoreBreakdown) {
 	var bestTx *plaidTx
 	var bestScore scoreBreakdown
@@ -611,6 +627,20 @@ func (h *MatchingEngineHandler) scorePeriodCandidates(
 			s.Invoice = 10
 		}
 		s.Total = s.Amount + s.Date + s.Vendor + s.Invoice + s.Location
+
+		if debug {
+			txDate := ""
+			if tx.TransactionDate.Valid {
+				txDate = tx.TransactionDate.Time.Format("2006-01-02")
+			}
+			merchant := ""
+			if tx.NormalizedMerch.Valid {
+				merchant = tx.NormalizedMerch.String
+			}
+			log.Printf("[MatchEngine] Scoring candidate: txID=%s merchant=%s amount=%.2f date=%s scores: amt=%.1f date=%.1f vendor=%.1f loc=%.1f inv=%.1f TOTAL=%.1f threshold=%.0f",
+				tx.ID, merchant, txAmt, txDate,
+				s.Amount, s.Date, s.Vendor, s.Location, s.Invoice, s.Total, matchThreshold)
+		}
 
 		if s.Total > bestScore.Total {
 			bestScore = s
