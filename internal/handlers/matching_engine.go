@@ -320,8 +320,19 @@ func (h *MatchingEngineHandler) matchStatements(
 	for si, stmt := range stmts {
 		// Step 2: Parse line_items JSONB and match to invoice docs
 		lineItems := h.parseStatementLineItems(db, stmt)
-		if len(lineItems) == 0 && si < 3 {
-			log.Printf("[MatchEngine] Statement %s: no line items found", stmt.ID)
+
+		vendorLabel := ""
+		if stmt.VendorNorm.Valid {
+			vendorLabel = stmt.VendorNorm.String
+		}
+		stmtIDShort := stmt.ID
+		if len(stmtIDShort) > 8 {
+			stmtIDShort = stmtIDShort[:8]
+		}
+
+		if si < 3 {
+			log.Printf("[MatchEngine] Statement %s: checking %d line items for vendor=%s",
+				stmtIDShort, len(lineItems), vendorLabel)
 		}
 
 		var matchedInvIDs []string
@@ -330,18 +341,34 @@ func (h *MatchingEngineHandler) matchStatements(
 			if li.InvoiceID == "" {
 				continue
 			}
+			if si < 3 {
+				log.Printf("[MatchEngine]   Looking for invoiceId=%s in wf_documents (vendor_id=%s)",
+					li.InvoiceID, stmt.VendorID.String)
+			}
 			// Find invoice doc by vendor_id + invoice_number
 			var invID string
+			var invAmt sql.NullFloat64
 			err := db.QueryRow(`
-				SELECT id FROM wf_documents
+				SELECT id, amount FROM wf_documents
 				WHERE vendor_id = $1
 				  AND invoice_number = $2
 				  AND doc_type IN ('invoice', 'credit', 'credit_memo')
 				LIMIT 1`,
-				stmt.VendorID.String, li.InvoiceID).Scan(&invID)
+				stmt.VendorID.String, li.InvoiceID).Scan(&invID, &invAmt)
 			if err == nil && invID != "" {
 				matchedInvIDs = append(matchedInvIDs, invID)
 				matchedInvTotal += math.Abs(li.Amount)
+				if si < 3 {
+					amt := 0.0
+					if invAmt.Valid {
+						amt = invAmt.Float64
+					}
+					log.Printf("[MatchEngine]   Found invoice: %s amount=%.2f (lineItemAmt=%.2f)", invID[:8], amt, li.Amount)
+				}
+			} else {
+				if si < 3 {
+					log.Printf("[MatchEngine]   NOT FOUND: invoiceId=%s (err=%v)", li.InvoiceID, err)
+				}
 			}
 		}
 
@@ -454,12 +481,15 @@ func (h *MatchingEngineHandler) matchStatements(
 
 // loadPendingStatements loads statement docs with vendor info.
 func (h *MatchingEngineHandler) loadPendingStatements(db *sql.DB) ([]wfDoc, error) {
+	// Statements can have NULL amounts — use relaxed WHERE (no amount filter)
 	query := fmt.Sprintf(`SELECT %s
 		FROM wf_documents d
 		LEFT JOIN vendors v ON v.id = d.vendor_id
-		WHERE %s
+		WHERE d.match_status = 'pending'
+		  AND d.doc_date > '2020-01-01'
+		  AND d.vendor_id IS NOT NULL
 		  AND d.doc_type = 'statement'
-		ORDER BY d.doc_date ASC`, docSelectCols, docBaseWhere)
+		ORDER BY d.doc_date ASC`, docSelectCols)
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, err
