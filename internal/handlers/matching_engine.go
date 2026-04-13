@@ -317,23 +317,18 @@ func (h *MatchingEngineHandler) matchStatements(
 	}
 	log.Printf("[MatchEngine] Statement matching: %d pending statements", len(stmts))
 
-	for si, stmt := range stmts {
-		// Step 2: Parse line_items JSONB and match to invoice docs
-		lineItems := h.parseStatementLineItems(db, stmt)
-
+	for _, stmt := range stmts {
 		vendorLabel := ""
 		if stmt.VendorNorm.Valid {
 			vendorLabel = stmt.VendorNorm.String
 		}
-		stmtIDShort := stmt.ID
-		if len(stmtIDShort) > 8 {
-			stmtIDShort = stmtIDShort[:8]
+		locationLabel := ""
+		if stmt.LocationName.Valid {
+			locationLabel = stmt.LocationName.String
 		}
 
-		if si < 3 {
-			log.Printf("[MatchEngine] Statement %s: checking %d line items for vendor=%s",
-				stmtIDShort, len(lineItems), vendorLabel)
-		}
+		// Step 2: Parse line_items JSONB and match to invoice docs by invoice number
+		lineItems := h.parseStatementLineItems(db, stmt)
 
 		var matchedInvIDs []string
 		matchedInvTotal := 0.0
@@ -341,11 +336,6 @@ func (h *MatchingEngineHandler) matchStatements(
 			if li.InvoiceID == "" {
 				continue
 			}
-			if si < 3 {
-				log.Printf("[MatchEngine]   Looking for invoiceId=%s in wf_documents (vendor_id=%s)",
-					li.InvoiceID, stmt.VendorID.String)
-			}
-			// Find invoice doc by vendor_id + invoice_number
 			var invID string
 			var invAmt sql.NullFloat64
 			err := db.QueryRow(`
@@ -358,21 +348,24 @@ func (h *MatchingEngineHandler) matchStatements(
 			if err == nil && invID != "" {
 				matchedInvIDs = append(matchedInvIDs, invID)
 				matchedInvTotal += math.Abs(li.Amount)
-				if si < 3 {
-					amt := 0.0
-					if invAmt.Valid {
-						amt = invAmt.Float64
-					}
-					log.Printf("[MatchEngine]   Found invoice: %s amount=%.2f (lineItemAmt=%.2f)", invID[:8], amt, li.Amount)
-				}
-			} else {
-				if si < 3 {
-					log.Printf("[MatchEngine]   NOT FOUND: invoiceId=%s (err=%v)", li.InvoiceID, err)
-				}
 			}
 		}
 
-		// Step 3: Calculate confidence
+		// Fallback: if invoice number matching got < 50% of line items,
+		// find invoices by date range + vendor instead
+		usedFallback := false
+		if len(lineItems) == 0 || len(matchedInvIDs)*2 < len(lineItems) {
+			fallbackIDs, fallbackTotal := h.fallbackInvoicesByDateRange(db, stmt)
+			if len(fallbackIDs) > 0 {
+				matchedInvIDs = fallbackIDs
+				matchedInvTotal = fallbackTotal
+				usedFallback = true
+				log.Printf("[MatchEngine] Statement fallback: vendor=%s location=%s found %d invoices by date range total=%.2f",
+					vendorLabel, locationLabel, len(fallbackIDs), fallbackTotal)
+			}
+		}
+
+		// Determine match amount
 		stmtAmount := 0.0
 		if stmt.Amount.Valid {
 			stmtAmount = math.Abs(stmt.Amount.Float64)
@@ -382,17 +375,14 @@ func (h *MatchingEngineHandler) matchStatements(
 			matchAmount = matchedInvTotal
 		}
 
-		if si < 3 {
-			log.Printf("[MatchEngine] Statement %s: vendor=%s amount=%.2f lineItems=%d matchedInvoices=%d matchedTotal=%.2f",
-				stmt.ID, stmt.VendorNorm.String, stmtAmount, len(lineItems), len(matchedInvIDs), matchedInvTotal)
-		}
-
 		if matchAmount == 0 {
 			unmatched++
 			continue
 		}
 
-		// Step 5: Find matching Plaid transaction for the statement total
+		_ = usedFallback
+
+		// Step 5: Find matching Plaid transaction
 		vendorNorm := ""
 		if stmt.VendorNorm.Valid {
 			vendorNorm = stmt.VendorNorm.String
@@ -417,20 +407,6 @@ func (h *MatchingEngineHandler) matchStatements(
 			}
 			s.Total = s.Amount + s.Date + s.Vendor + s.Invoice + s.Location
 
-			if si < 3 {
-				txDate := ""
-				if tx.TransactionDate.Valid {
-					txDate = tx.TransactionDate.Time.Format("2006-01-02")
-				}
-				merchant := ""
-				if tx.NormalizedMerch.Valid {
-					merchant = tx.NormalizedMerch.String
-				}
-				log.Printf("[MatchEngine] Stmt %s candidate: txID=%s merchant=%s amount=%.2f date=%s scores: amt=%.1f date=%.1f vendor=%.1f loc=%.1f TOTAL=%.1f",
-					stmt.ID, tx.ID, merchant, txAmt, txDate,
-					s.Amount, s.Date, s.Vendor, s.Location, s.Total)
-			}
-
 			if s.Total > bestScore.Total {
 				bestScore = s
 				bestTx = tx
@@ -438,13 +414,6 @@ func (h *MatchingEngineHandler) matchStatements(
 		}
 
 		if bestTx == nil || bestScore.Total < matchThreshold {
-			if si < 3 {
-				best := 0.0
-				if bestTx != nil {
-					best = bestScore.Total
-				}
-				log.Printf("[MatchEngine] Statement %s: NO TX MATCH (best=%.1f threshold=%.0f)", stmt.ID, best, matchThreshold)
-			}
 			unmatched++
 			continue
 		}
@@ -471,10 +440,8 @@ func (h *MatchingEngineHandler) matchStatements(
 			matched++
 		}
 
-		if si < 3 {
-			log.Printf("[MatchEngine] Statement %s: MATCHED tx=%s score=%.1f, linked %d invoices",
-				stmt.ID, bestTx.ID, bestScore.Total, len(matchedInvIDs))
-		}
+		log.Printf("[MatchEngine] Statement %s: MATCHED tx=%s score=%.1f, linked %d invoices",
+			stmt.ID, bestTx.ID, bestScore.Total, len(matchedInvIDs))
 	}
 	return
 }
@@ -577,6 +544,54 @@ func (h *MatchingEngineHandler) loadTxnsForStatement(
 	defer rows.Close()
 	txns, _ := scanTxns(rows)
 	return txns
+}
+
+// fallbackInvoicesByDateRange finds pending invoices/credits for the same
+// vendor + location within the statement's date window (doc_date - 7 to doc_date).
+func (h *MatchingEngineHandler) fallbackInvoicesByDateRange(db *sql.DB, stmt wfDoc) ([]string, float64) {
+	if !stmt.DocDate.Valid || !stmt.VendorID.Valid {
+		return nil, 0
+	}
+	dateTo := stmt.DocDate.Time.Format("2006-01-02")
+	dateFrom := stmt.DocDate.Time.AddDate(0, 0, -7).Format("2006-01-02")
+
+	// Build location filter — match if both have location, skip if stmt has none
+	locFilter := ""
+	var args []interface{}
+	args = append(args, stmt.VendorID.String, dateFrom, dateTo) // $1, $2, $3
+	if stmt.LocationName.Valid && stmt.LocationName.String != "" &&
+		!strings.EqualFold(stmt.LocationName.String, "Unknown") {
+		locFilter = "AND location_name = $4"
+		args = append(args, stmt.LocationName.String)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, COALESCE(ABS(amount), 0) FROM wf_documents
+		WHERE vendor_id = $1
+		  AND doc_date BETWEEN $2 AND $3
+		  AND doc_type IN ('invoice', 'credit', 'credit_memo')
+		  AND match_status = 'pending'
+		  %s
+		ORDER BY doc_date ASC`, locFilter)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		log.Printf("[MatchEngine] fallbackInvoicesByDateRange error: %v", err)
+		return nil, 0
+	}
+	defer rows.Close()
+
+	var ids []string
+	total := 0.0
+	for rows.Next() {
+		var id string
+		var amt float64
+		if rows.Scan(&id, &amt) == nil {
+			ids = append(ids, id)
+			total += amt
+		}
+	}
+	return ids, total
 }
 
 // ═══════════════════════════════════════════════════════════════
