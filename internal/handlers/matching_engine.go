@@ -67,7 +67,7 @@ type vendorAlias struct {
 	LocationName string // empty = global alias
 }
 
-const matchThreshold = 75.0
+const matchThreshold = 55.0 // TODO: raise back to 75 after tuning
 
 // ── POST /admin/run-matching ────────────────────────────────────
 
@@ -324,6 +324,7 @@ func (h *MatchingEngineHandler) loadPendingDocs(db *sql.DB) ([]wfDoc, error) {
 		WHERE d.match_status = 'pending'
 		  AND d.doc_date > '2020-01-01'
 		  AND d.vendor_id IS NOT NULL
+		  AND d.amount IS NOT NULL
 		ORDER BY d.doc_date ASC`)
 	if err != nil {
 		return nil, err
@@ -537,9 +538,14 @@ func scoreLocationMatch(doc wfDoc, tx plaidTx) float64 {
 	if !doc.LocationName.Valid || !tx.LocationName.Valid {
 		return 0
 	}
-	if strings.EqualFold(
-		strings.TrimSpace(doc.LocationName.String),
-		strings.TrimSpace(tx.LocationName.String)) {
+	docLoc := strings.TrimSpace(doc.LocationName.String)
+	txLoc := strings.TrimSpace(tx.LocationName.String)
+	// Treat "Unknown" or empty as neutral — no award, no penalty
+	if docLoc == "" || txLoc == "" ||
+		strings.EqualFold(docLoc, "Unknown") || strings.EqualFold(txLoc, "Unknown") {
+		return 0
+	}
+	if strings.EqualFold(docLoc, txLoc) {
 		return 10
 	}
 	return 0
