@@ -197,21 +197,12 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 
 			isMultiPay := p.RepDoc.MultiPayment.Valid && p.RepDoc.MultiPayment.Bool
 
-			// Step 2: Find transactions by amount (amount-first lookup)
-			if debugCandCount < 3 {
-				windowStart := p.PeriodStart.AddDate(0, 0, -3)
-				windowEnd := p.PeriodEnd.AddDate(0, 0, 16)
-				log.Printf("[MatchEngine] Looking for txns: vendor=%s amount=%.2f window=%s to %s (periodStart=%s periodEnd=%s)",
-					p.VendorNorm, periodTotal,
-					windowStart.Format("2006-01-02"), windowEnd.Format("2006-01-02"),
-					p.PeriodStart.Format("2006-01-02"), p.PeriodEnd.Format("2006-01-02"))
-			}
-			txns := h.loadTxnsByAmount(db, periodTotal, p.PeriodStart, p.PeriodEnd, p.VendorNorm, aliases, p.RepDoc)
+			// Step 2: Load vendor-scoped transactions (no amount filter)
+			txns := h.loadTxnsForPeriod(db, p, aliases)
 
 			debugThisPeriod := len(txns) > 0 && debugCandCount < 3
 			if debugThisPeriod {
 				debugCandCount++
-				log.Printf("[MatchEngine] Found %d candidate txns for period (vendor=%s amount=%.2f)", len(txns), p.VendorNorm, periodTotal)
 			}
 
 			if !isMultiPay {
@@ -478,101 +469,44 @@ func buildStatementPeriods(docs []wfDoc) []statementPeriod {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// AMOUNT-FIRST TRANSACTION LOADING
+// VENDOR+DATE SCOPED TRANSACTION LOADING (no amount filter)
 // ═══════════════════════════════════════════════════════════════
 
-// loadTxnsByAmount finds transactions by amount match (within 1%) for a period total.
-// Date window: period_start - 3 to period_end + 16.
-func (h *MatchingEngineHandler) loadTxnsByAmount(
-	db *sql.DB, periodTotal float64,
-	periodStart, periodEnd time.Time,
-	vendorNorm string, aliases map[string][]vendorAlias, repDoc wfDoc,
+// loadTxnsForPeriod loads pending transactions matching the period's vendor
+// name/aliases within the date window (periodStart-3 to periodEnd+16).
+// No amount filter — amount scoring happens in Go code.
+// No location filter — location scoring happens in Go code.
+func (h *MatchingEngineHandler) loadTxnsForPeriod(
+	db *sql.DB, p *statementPeriod, aliases map[string][]vendorAlias,
 ) []plaidTx {
-	from := periodStart.AddDate(0, 0, -3).Format("2006-01-02")
-	to := periodEnd.AddDate(0, 0, 16).Format("2006-01-02")
-	amtLow := periodTotal * 0.99
-	amtHigh := periodTotal * 1.01
+	from := p.PeriodStart.AddDate(0, 0, -3).Format("2006-01-02")
+	to := p.PeriodEnd.AddDate(0, 0, 16).Format("2006-01-02")
 
-	// Build vendor LIKE patterns
+	// Build vendor LIKE patterns from normalized_name + aliases
 	var patterns []string
-	if vendorNorm != "" {
-		patterns = append(patterns, strings.ToLower(strings.TrimSpace(vendorNorm)))
+	if p.VendorNorm != "" {
+		patterns = append(patterns, strings.ToLower(strings.TrimSpace(p.VendorNorm)))
 	}
-	if repDoc.VendorID.Valid {
-		for _, a := range aliases[repDoc.VendorID.String] {
+	if p.RepDoc.VendorID.Valid {
+		for _, a := range aliases[p.RepDoc.VendorID.String] {
 			patterns = append(patterns, a.Alias)
 		}
 	}
 
-	// Query: amount within 1% AND date in window AND vendor match
-	var args []interface{}
-	args = append(args, from, to, amtLow, amtHigh) // $1-$4
-
-	vendorCond := "true" // no vendor filter if no patterns
-	if len(patterns) > 0 {
-		var likeConds []string
-		for _, p := range patterns {
-			args = append(args, "%"+p+"%")
-			likeConds = append(likeConds, fmt.Sprintf("normalized_merchant LIKE $%d", len(args)))
-		}
-		vendorCond = "(" + strings.Join(likeConds, " OR ") + ")"
-	}
-
-	args = append(args, txBatchLimit)
-	limitIdx := len(args)
-
-	query := fmt.Sprintf(`
-		SELECT id, location_name, transaction_date, amount,
-		       description, merchant_name, normalized_merchant
-		FROM plaid_transactions
-		WHERE match_status = 'pending'
-		  AND transaction_date BETWEEN $1 AND $2
-		  AND (ABS(amount) BETWEEN $3 AND $4)
-		  AND %s
-		ORDER BY ABS(ABS(amount) - %f) ASC
-		LIMIT $%d`, vendorCond, periodTotal, limitIdx)
-
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		log.Printf("[MatchEngine] loadTxnsByAmount error: %v", err)
+	if len(patterns) == 0 {
+		log.Printf("[MatchEngine] loadTxnsForPeriod: no vendor patterns for vendor=%s — skipping", p.VendorNorm)
 		return nil
-	}
-	defer rows.Close()
-	txns, _ := scanTxns(rows)
-	return txns
-}
-
-// loadTxnsByAmountMulti loads ALL vendor-matching transactions in the date window
-// (not filtered by amount) for multi-payment summing.
-func (h *MatchingEngineHandler) loadTxnsByAmountMulti(
-	db *sql.DB, periodStart, periodEnd time.Time,
-	vendorNorm string, aliases map[string][]vendorAlias, repDoc wfDoc,
-) []plaidTx {
-	from := periodStart.AddDate(0, 0, -3).Format("2006-01-02")
-	to := periodEnd.AddDate(0, 0, 16).Format("2006-01-02")
-
-	var patterns []string
-	if vendorNorm != "" {
-		patterns = append(patterns, strings.ToLower(strings.TrimSpace(vendorNorm)))
-	}
-	if repDoc.VendorID.Valid {
-		for _, a := range aliases[repDoc.VendorID.String] {
-			patterns = append(patterns, a.Alias)
-		}
 	}
 
 	var args []interface{}
 	args = append(args, from, to) // $1, $2
 
-	vendorCond := "true"
-	if len(patterns) > 0 {
-		var likeConds []string
-		for _, p := range patterns {
-			args = append(args, "%"+p+"%")
-			likeConds = append(likeConds, fmt.Sprintf("normalized_merchant LIKE $%d", len(args)))
-		}
-		vendorCond = "(" + strings.Join(likeConds, " OR ") + ")"
+	var likeConds []string
+	for _, pat := range patterns {
+		args = append(args, "%"+pat+"%")
+		likeConds = append(likeConds, fmt.Sprintf("normalized_merchant LIKE $%d", len(args)))
 	}
+	vendorCond := "(" + strings.Join(likeConds, " OR ") + ")"
 
 	args = append(args, txBatchLimit)
 	limitIdx := len(args)
@@ -589,11 +523,15 @@ func (h *MatchingEngineHandler) loadTxnsByAmountMulti(
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		log.Printf("[MatchEngine] loadTxnsByAmountMulti error: %v", err)
+		log.Printf("[MatchEngine] loadTxnsForPeriod error: %v", err)
 		return nil
 	}
 	defer rows.Close()
 	txns, _ := scanTxns(rows)
+
+	log.Printf("[MatchEngine] Period vendor=%s location=%s dates=%s to %s → found %d vendor transactions to score",
+		p.VendorNorm, p.Location, from, to, len(txns))
+
 	return txns
 }
 
@@ -659,8 +597,7 @@ func (h *MatchingEngineHandler) matchMultiPayPeriod(
 	txns []plaidTx, consumed map[string]bool, aliases map[string][]vendorAlias,
 ) (matched int, unmatched int, errors []string) {
 	if len(txns) == 0 {
-		// Load all vendor transactions in the window (not amount-filtered)
-		txns = h.loadTxnsByAmountMulti(db, p.PeriodStart, p.PeriodEnd, p.VendorNorm, aliases, p.RepDoc)
+		txns = h.loadTxnsForPeriod(db, p, aliases)
 	}
 
 	// Filter to unconsumed vendor-matching candidates
