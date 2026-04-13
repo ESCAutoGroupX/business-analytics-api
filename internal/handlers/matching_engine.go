@@ -86,27 +86,13 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 
 	// ── Log wf_documents schema for diagnostics ─────────────────
 	h.logTableColumns(db, "wf_documents")
+	h.logTableColumns(db, "vendors")
 
-	// ── Link wf_documents to vendors (handles both vendor_name and vendor columns) ──
-	db.Exec(`DO $$
-	BEGIN
-		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='wf_documents' AND column_name='vendor_name') THEN
-			UPDATE wf_documents wd SET vendor_id = v.id FROM vendors v
-			WHERE wd.vendor_id IS NULL AND LOWER(TRIM(wd.vendor_name)) = v.normalized_name;
-			UPDATE wf_documents wd SET vendor_id = va.vendor_id FROM vendor_aliases va
-			WHERE wd.vendor_id IS NULL AND LOWER(TRIM(wd.vendor_name)) = LOWER(TRIM(va.alias));
-		ELSIF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='wf_documents' AND column_name='vendor') THEN
-			UPDATE wf_documents wd SET vendor_id = v.id FROM vendors v
-			WHERE wd.vendor_id IS NULL AND LOWER(TRIM(wd.vendor)) = v.normalized_name;
-			UPDATE wf_documents wd SET vendor_id = va.vendor_id FROM vendor_aliases va
-			WHERE wd.vendor_id IS NULL AND LOWER(TRIM(wd.vendor)) = LOWER(TRIM(va.alias));
-		END IF;
-	END $$`)
-
+	// ── Log vendor_id coverage (vendor_id is pre-populated on wf_documents) ──
 	var linkedCount, unlinkedCount int
 	db.QueryRow(`SELECT COUNT(*) FROM wf_documents WHERE vendor_id IS NOT NULL`).Scan(&linkedCount)
 	db.QueryRow(`SELECT COUNT(*) FROM wf_documents WHERE vendor_id IS NULL`).Scan(&unlinkedCount)
-	log.Printf("[MatchEngine] Vendor linking: %d linked, %d unlinked", linkedCount, unlinkedCount)
+	log.Printf("[MatchEngine] Vendor coverage: %d linked, %d unlinked (vendor_id already set on wf_documents)", linkedCount, unlinkedCount)
 
 	// ── Load data ───────────────────────────────────────────────
 	docs, err := h.loadPendingDocs(db)
@@ -328,10 +314,11 @@ func (h *MatchingEngineHandler) loadPendingDocs(db *sql.DB) ([]wfDoc, error) {
 	rows, err := db.Query(`
 		SELECT d.id, d.vendor_id, d.location_name, d.doc_type, d.doc_date,
 		       d.amount, d.invoice_number, d.matched_rma_id, d.matched_credit_id,
-		       v.normalized_name, v.statement_frequency,
-		       COALESCE(v.multi_payment, false)
+		       v.normalized_name AS vendor_normalized_name,
+		       v.statement_frequency,
+		       COALESCE(v.multi_payment, false) AS multi_payment
 		FROM wf_documents d
-		LEFT JOIN vendors v ON v.id::text = d.vendor_id::text
+		LEFT JOIN vendors v ON v.id = d.vendor_id
 		WHERE d.match_status = 'pending'
 		ORDER BY d.doc_date ASC`)
 	if err != nil {
