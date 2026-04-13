@@ -27,18 +27,19 @@ func (h *MatchingEngineHandler) sqlDB() *sql.DB {
 // ── Row types ───────────────────────────────────────────────────
 
 type wfDoc struct {
-	ID              string
-	VendorID        sql.NullString
-	LocationName    sql.NullString
-	DocType         sql.NullString
-	DocDate         sql.NullTime
-	Amount          sql.NullFloat64
-	InvoiceNumber   sql.NullString
-	MatchedRMAID    sql.NullString
-	MatchedCreditID sql.NullString
-	VendorNorm      sql.NullString // vendors.normalized_name
-	StmtFreq        sql.NullString // vendors.statement_frequency
-	MultiPayment    sql.NullBool   // vendors.multi_payment
+	ID                string
+	VendorID          sql.NullString
+	LocationName      sql.NullString
+	DocType           sql.NullString
+	DocDate           sql.NullTime
+	Amount            sql.NullFloat64
+	InvoiceNumber     sql.NullString
+	MatchedRMAID      sql.NullString
+	MatchedCreditID   sql.NullString
+	VendorNorm        sql.NullString // vendors.normalized_name
+	StmtFreq          sql.NullString // vendors.statement_frequency
+	MultiPayment      sql.NullBool   // vendors.multi_payment
+	IsStatementVendor sql.NullBool   // derived: vendor_type = 'statement'
 }
 
 type plaidTx struct {
@@ -217,7 +218,7 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 
 	// ── 3. Direct vendor: match each invoice individually ────────
 	for _, doc := range directDocs {
-		isCOD := isCODVendor(doc.StmtFreq)
+		isCOD := isCODVendor(doc)
 		dateWindow := 3
 		if isCOD {
 			dateWindow = 0
@@ -315,8 +316,9 @@ func (h *MatchingEngineHandler) loadPendingDocs(db *sql.DB) ([]wfDoc, error) {
 		SELECT d.id, d.vendor_id, d.location_name, d.doc_type, d.doc_date,
 		       d.amount, d.invoice_number, d.matched_rma_id, d.matched_credit_id,
 		       v.normalized_name AS vendor_normalized_name,
-		       v.statement_frequency,
-		       COALESCE(v.multi_payment, false) AS multi_payment
+		       v.statement_frequency AS stmt_freq,
+		       COALESCE(v.multi_payment, false) AS multi_payment,
+		       CASE WHEN v.vendor_type = 'statement' THEN true ELSE false END AS is_statement_vendor
 		FROM wf_documents d
 		LEFT JOIN vendors v ON v.id = d.vendor_id
 		WHERE d.match_status = 'pending'
@@ -331,7 +333,7 @@ func (h *MatchingEngineHandler) loadPendingDocs(db *sql.DB) ([]wfDoc, error) {
 		var d wfDoc
 		if err := rows.Scan(&d.ID, &d.VendorID, &d.LocationName, &d.DocType,
 			&d.DocDate, &d.Amount, &d.InvoiceNumber, &d.MatchedRMAID, &d.MatchedCreditID,
-			&d.VendorNorm, &d.StmtFreq, &d.MultiPayment); err != nil {
+			&d.VendorNorm, &d.StmtFreq, &d.MultiPayment, &d.IsStatementVendor); err != nil {
 			return nil, err
 		}
 		docs = append(docs, d)
@@ -592,17 +594,30 @@ func isMultiPaymentVendor(doc wfDoc) bool {
 }
 
 func isStatementWeekly(doc wfDoc) bool {
+	// Statement vendor: vendor_type = 'statement' with weekly frequency
+	isStmt := doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool
+	if !isStmt {
+		return false
+	}
 	if !doc.StmtFreq.Valid {
 		return false
 	}
 	return strings.EqualFold(doc.StmtFreq.String, "weekly")
 }
 
-func isCODVendor(stmtFreq sql.NullString) bool {
-	if !stmtFreq.Valid || strings.TrimSpace(stmtFreq.String) == "" {
+func isStatementVendor(doc wfDoc) bool {
+	return doc.IsStatementVendor.Valid && doc.IsStatementVendor.Bool
+}
+
+func isCODVendor(doc wfDoc) bool {
+	// Statement vendors are never COD
+	if isStatementVendor(doc) {
+		return false
+	}
+	if !doc.StmtFreq.Valid || strings.TrimSpace(doc.StmtFreq.String) == "" {
 		return true
 	}
-	return strings.EqualFold(stmtFreq.String, "cod")
+	return strings.EqualFold(doc.StmtFreq.String, "cod")
 }
 
 func groupByWeek(docs []wfDoc) []weekBucket {
