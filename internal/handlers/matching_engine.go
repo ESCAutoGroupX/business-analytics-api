@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +73,14 @@ const matchThreshold = 55.0 // TODO: raise back to 75 after tuning
 // ── POST /admin/run-matching ────────────────────────────────────
 
 func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[MatchEngine] PANIC: %v", r)
+			debug.PrintStack()
+		}
+	}()
+	log.Printf("[MatchEngine] Starting RunMatching")
+
 	db := h.sqlDB()
 	if db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database unavailable"})
@@ -86,12 +95,16 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	db.Exec(`ALTER TABLE statement_periods ADD CONSTRAINT statement_periods_status_check CHECK (status IN ('open', 'reconciled', 'discrepancy', 'fully_matched', 'partial'))`)
 
 	// ── RSR Auto Parts alias for Carquest at Highlands ──────────
-	db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source, location_name)
+	if _, err := db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source, location_name)
 		SELECT gen_random_uuid(), v.id, 'rsr auto parts', 'manual', 'Highlands'
 		FROM vendors v WHERE v.normalized_name = 'carquest auto parts'
-		ON CONFLICT DO NOTHING`)
-	db.Exec(`UPDATE vendors SET vendor_type = 'statement', statement_frequency = 'weekly'
-		WHERE normalized_name = 'rsr auto parts'`)
+		ON CONFLICT DO NOTHING`); err != nil {
+		log.Printf("[MatchEngine] RSR alias INSERT error: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE vendors SET vendor_type = 'statement', statement_frequency = 'weekly'
+		WHERE normalized_name = 'rsr auto parts'`); err != nil {
+		log.Printf("[MatchEngine] RSR vendor UPDATE error: %v", err)
+	}
 
 	// ── Log wf_documents schema for diagnostics ─────────────────
 	h.logTableColumns(db, "wf_documents")
