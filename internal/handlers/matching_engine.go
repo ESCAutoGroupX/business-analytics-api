@@ -351,38 +351,36 @@ func (h *MatchingEngineHandler) matchStatements(
 			}
 		}
 
-		// Fallback: if invoice number matching got < 50% of line items,
-		// find invoices by date range + vendor instead
-		usedFallback := false
-		if len(lineItems) == 0 || len(matchedInvIDs)*2 < len(lineItems) {
+		// Fallback: only if invoice number matching found ZERO invoices
+		if len(matchedInvIDs) == 0 {
 			fallbackIDs, fallbackTotal := h.fallbackInvoicesByDateRange(db, stmt)
 			if len(fallbackIDs) > 0 {
 				matchedInvIDs = fallbackIDs
 				matchedInvTotal = fallbackTotal
-				usedFallback = true
 				log.Printf("[MatchEngine] Statement fallback: vendor=%s location=%s found %d invoices by date range total=%.2f",
 					vendorLabel, locationLabel, len(fallbackIDs), fallbackTotal)
 			}
 		}
 
-		// Determine match amount
+		// Determine the amount to use for Plaid transaction lookup:
+		// a) statement.Amount if present and > 0
+		// b) matchedInvTotal from invoice matches
 		stmtAmount := 0.0
-		if stmt.Amount.Valid {
+		if stmt.Amount.Valid && stmt.Amount.Float64 != 0 {
 			stmtAmount = math.Abs(stmt.Amount.Float64)
 		}
-		matchAmount := stmtAmount
-		if matchAmount == 0 {
-			matchAmount = matchedInvTotal
+		lookupAmount := stmtAmount // preferred
+		if lookupAmount == 0 {
+			lookupAmount = matchedInvTotal // fallback
 		}
 
-		if matchAmount == 0 {
+		if lookupAmount == 0 && len(matchedInvIDs) == 0 {
 			unmatched++
 			continue
 		}
 
-		_ = usedFallback
-
-		// Step 5: Find matching Plaid transaction
+		// Step 5: Find matching Plaid transaction by vendor + date window
+		// (date window: stmt.DocDate to stmt.DocDate + 16 days — set in loadTxnsForStatement)
 		vendorNorm := ""
 		if stmt.VendorNorm.Valid {
 			vendorNorm = stmt.VendorNorm.String
@@ -397,8 +395,10 @@ func (h *MatchingEngineHandler) matchStatements(
 				continue
 			}
 			txAmt := math.Abs(tx.Amount.Float64)
+
+			// Amount scoring: compare tx amount to lookupAmount
 			s := scoreBreakdown{
-				Amount:   scoreAmount(matchAmount, txAmt),
+				Amount:   scoreAmount(lookupAmount, txAmt),
 				Vendor:   scoreVendorWithAliases(stmt, *tx, aliases),
 				Location: scoreLocationMatch(stmt, *tx),
 			}
