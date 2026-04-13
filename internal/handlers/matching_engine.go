@@ -77,9 +77,42 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 		return
 	}
 
-	// Ensure location_name column exists on vendor_aliases
+	// ── Pre-flight migrations ───────────────────────────────────
 	db.Exec(`ALTER TABLE vendor_aliases ADD COLUMN IF NOT EXISTS location_name VARCHAR`)
+	db.Exec(`ALTER TABLE match_results DROP CONSTRAINT IF EXISTS match_results_match_type_check`)
+	db.Exec(`ALTER TABLE match_results ADD CONSTRAINT match_results_match_type_check CHECK (match_type IN ('auto', 'manual', 'ai_tiebreak', 'auto_multi_pay', 'auto_multi_pay_partial', 'auto_statement_group'))`)
 
+	// ── Log wf_documents schema for diagnostics ─────────────────
+	h.logTableColumns(db, "wf_documents")
+
+	// ── Link wf_documents to vendors by normalized name ─────────
+	res1, _ := db.Exec(`
+		UPDATE wf_documents wd
+		SET vendor_id = v.id
+		FROM vendors v
+		WHERE wd.vendor_id IS NULL
+		AND LOWER(TRIM(wd.vendor_name)) = v.normalized_name`)
+	if res1 != nil {
+		n, _ := res1.RowsAffected()
+		if n > 0 {
+			log.Printf("[MatchEngine] Linked %d documents to vendors by normalized name", n)
+		}
+	}
+
+	res2, _ := db.Exec(`
+		UPDATE wf_documents wd
+		SET vendor_id = va.vendor_id
+		FROM vendor_aliases va
+		WHERE wd.vendor_id IS NULL
+		AND LOWER(TRIM(wd.vendor_name)) = LOWER(TRIM(va.alias))`)
+	if res2 != nil {
+		n, _ := res2.RowsAffected()
+		if n > 0 {
+			log.Printf("[MatchEngine] Linked %d documents to vendors by alias", n)
+		}
+	}
+
+	// ── Load data ───────────────────────────────────────────────
 	docs, err := h.loadPendingDocs(db)
 	if err != nil {
 		log.Printf("[MatchEngine] load docs error: %v", err)
@@ -272,6 +305,25 @@ func (h *MatchingEngineHandler) MatchStats(c *gin.Context) {
 		},
 		"match_rate_pct": math.Round(matchRate*100) / 100,
 	})
+}
+
+// ── Diagnostics ─────────────────────────────────────────────────
+
+func (h *MatchingEngineHandler) logTableColumns(db *sql.DB, tableName string) {
+	rows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position`, tableName)
+	if err != nil {
+		log.Printf("[MatchEngine] schema query error for %s: %v", tableName, err)
+		return
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var col string
+		if rows.Scan(&col) == nil {
+			cols = append(cols, col)
+		}
+	}
+	log.Printf("[MatchEngine] %s columns: %s", tableName, strings.Join(cols, ", "))
 }
 
 // ── Data loaders ────────────────────────────────────────────────
