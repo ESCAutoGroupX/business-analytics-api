@@ -164,11 +164,10 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	// ═══════════════════════════════════════════════════════════════
 	var totalPending int
 	db.QueryRow(`SELECT COUNT(*) FROM wf_documents d
-		LEFT JOIN vendors v ON v.id = d.vendor_id
+		JOIN vendors v ON v.id = d.vendor_id
 		WHERE d.match_status = 'pending' AND d.doc_date > '2020-01-01'
-		AND d.vendor_id IS NOT NULL AND d.amount IS NOT NULL
-		AND NOT (v.vendor_type = 'statement' OR COALESCE(v.multi_payment, false) = true
-		         OR LOWER(v.statement_frequency) = 'weekly')`).Scan(&totalPending)
+		AND d.amount IS NOT NULL AND d.vendor_id IS NOT NULL
+		AND v.vendor_type != 'statement'`).Scan(&totalPending)
 
 	totalBatches := (totalPending + docBatchSize - 1) / docBatchSize
 	if totalBatches == 0 {
@@ -190,35 +189,53 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 			break
 		}
 
-		minDate, maxDate := batchDateRange(docs)
-		txns, err := h.loadTxnsForDateRange(db, minDate, maxDate)
-		if err != nil {
-			log.Printf("[MatchEngine] batch %d txn load error: %v", batchNum, err)
-			allErrors = append(allErrors, err.Error())
-			break
-		}
-
-		log.Printf("[MatchEngine] Batch %d/%d: docs %d-%d, %d transactions",
-			batchNum, totalBatches, offset+1, offset+len(docs), len(txns))
-
+		batchMatches := 0
 		for _, doc := range docs {
-			isCOD := isCODVendor(doc)
-			dateWindow := 3
-			if isCOD {
-				dateWindow = 0
+			vendorNorm := ""
+			if doc.VendorNorm.Valid {
+				vendorNorm = strings.ToLower(strings.TrimSpace(doc.VendorNorm.String))
 			}
-			best, bestScore := h.findDirectMatch(doc, txns, consumed, aliases, isCOD, dateWindow)
-			if best != nil && bestScore.Total >= matchThreshold {
-				if err := h.recordMatch(db, doc, *best, bestScore, "auto"); err != nil {
+			if vendorNorm == "" || !doc.DocDate.Valid || !doc.Amount.Valid {
+				totalUnmatched++
+				continue
+			}
+
+			txns := h.loadTxnsForDirectDoc(db, doc, vendorNorm)
+
+			var bestTx *plaidTx
+			var bestScore scoreBreakdown
+			for i := range txns {
+				tx := &txns[i]
+				if consumed[tx.ID] || !tx.Amount.Valid || !tx.TransactionDate.Valid {
+					continue
+				}
+				s := scoreBreakdown{
+					Amount:   scoreAmount(doc.Amount.Float64, math.Abs(tx.Amount.Float64)),
+					Date:     scoreDate(doc.DocDate.Time, tx.TransactionDate.Time),
+					Vendor:   25, // guaranteed by LIKE filter
+					Location: scoreLocationMatch(doc, *tx),
+				}
+				s.Total = s.Amount + s.Date + s.Vendor + s.Location
+				if s.Total > bestScore.Total {
+					bestScore = s
+					bestTx = tx
+				}
+			}
+
+			if bestTx != nil && bestScore.Total >= matchThreshold {
+				if err := h.recordMatch(db, doc, *bestTx, bestScore, "auto"); err != nil {
 					allErrors = append(allErrors, err.Error())
 					continue
 				}
-				consumed[best.ID] = true
+				consumed[bestTx.ID] = true
 				totalMatched++
+				batchMatches++
 			} else {
 				totalUnmatched++
 			}
 		}
+
+		log.Printf("[MatchEngine] Direct batch %d: %d docs, found %d matches", batchNum, len(docs), batchMatches)
 
 		offset += len(docs)
 		if len(docs) < docBatchSize {
@@ -351,12 +368,12 @@ func (h *MatchingEngineHandler) matchStatements(
 			}
 		}
 
-		// Fallback: only if invoice number matching found ZERO invoices
-		if len(matchedInvIDs) == 0 {
+		// Fallback: if invoice number matching linked < 50% of line items
+		if len(matchedInvIDs)*2 < len(lineItems) {
 			fallbackIDs, fallbackTotal := h.fallbackInvoicesByDateRange(db, stmt)
 			if len(fallbackIDs) > 0 {
-				matchedInvIDs = fallbackIDs
-				matchedInvTotal = fallbackTotal
+				matchedInvIDs = append(matchedInvIDs, fallbackIDs...)
+				matchedInvTotal += fallbackTotal
 				log.Printf("[MatchEngine] Statement fallback: vendor=%s location=%s found %d invoices by date range total=%.2f",
 					vendorLabel, locationLabel, len(fallbackIDs), fallbackTotal)
 			}
@@ -375,17 +392,31 @@ func (h *MatchingEngineHandler) matchStatements(
 		}
 
 		if lookupAmount == 0 && len(matchedInvIDs) == 0 {
+			log.Printf("[MatchEngine] Stmt SKIPPED: no usable amount for vendor=%s", vendorLabel)
 			unmatched++
 			continue
 		}
 
 		// Step 5: Find matching Plaid transaction by vendor + date window
-		// (date window: stmt.DocDate to stmt.DocDate + 16 days — set in loadTxnsForStatement)
 		vendorNorm := ""
 		if stmt.VendorNorm.Valid {
 			vendorNorm = stmt.VendorNorm.String
 		}
+
+		if stmt.DocDate.Valid {
+			log.Printf("[MatchEngine] Stmt tx lookup: vendor=%s stmtAmt=%.2f matchedTotal=%.2f lookupAmt=%.2f window=%s to %s",
+				vendorLabel, stmtAmount, matchedInvTotal, lookupAmount,
+				stmt.DocDate.Time.Format("2006-01-02"),
+				stmt.DocDate.Time.AddDate(0, 0, 16).Format("2006-01-02"))
+		}
+
 		txns := h.loadTxnsForStatement(db, stmt, vendorNorm, aliases)
+
+		if len(txns) == 0 {
+			log.Printf("[MatchEngine] Stmt NO TRANSACTIONS FOUND for vendor=%s", vendorLabel)
+		} else {
+			log.Printf("[MatchEngine] Stmt tx lookup result: found %d transactions", len(txns))
+		}
 
 		var bestTx *plaidTx
 		var bestScore scoreBreakdown
@@ -571,6 +602,7 @@ func (h *MatchingEngineHandler) fallbackInvoicesByDateRange(db *sql.DB, stmt wfD
 		  AND doc_date BETWEEN $2 AND $3
 		  AND doc_type IN ('invoice', 'credit', 'credit_memo')
 		  AND match_status = 'pending'
+		  AND matched_statement_id IS NULL
 		  %s
 		ORDER BY doc_date ASC`, locFilter)
 
@@ -649,12 +681,14 @@ func scanDoc(rows *sql.Rows) (wfDoc, error) {
 func (h *MatchingEngineHandler) loadDirectDocBatch(db *sql.DB, limit, offset int) ([]wfDoc, error) {
 	query := fmt.Sprintf(`SELECT %s
 		FROM wf_documents d
-		LEFT JOIN vendors v ON v.id = d.vendor_id
-		WHERE %s
-		  AND NOT (v.vendor_type = 'statement' OR COALESCE(v.multi_payment, false) = true
-		           OR LOWER(v.statement_frequency) = 'weekly')
-		ORDER BY d.doc_date ASC
-		LIMIT $1 OFFSET $2`, docSelectCols, docBaseWhere)
+		JOIN vendors v ON v.id = d.vendor_id
+		WHERE d.match_status = 'pending'
+		  AND d.doc_date > '2020-01-01'
+		  AND d.amount IS NOT NULL
+		  AND d.vendor_id IS NOT NULL
+		  AND v.vendor_type != 'statement'
+		ORDER BY d.doc_date
+		LIMIT $1 OFFSET $2`, docSelectCols)
 	rows, err := db.Query(query, limit, offset)
 	if err != nil {
 		return nil, err
@@ -669,6 +703,34 @@ func (h *MatchingEngineHandler) loadDirectDocBatch(db *sql.DB, limit, offset int
 		docs = append(docs, d)
 	}
 	return docs, rows.Err()
+}
+
+func (h *MatchingEngineHandler) loadTxnsForDirectDoc(db *sql.DB, doc wfDoc, vendorNorm string) []plaidTx {
+	if !doc.DocDate.Valid {
+		return nil
+	}
+	from := doc.DocDate.Time.AddDate(0, 0, -3).Format("2006-01-02")
+	to := doc.DocDate.Time.AddDate(0, 0, 7).Format("2006-01-02")
+	docAmt := 0.0
+	if doc.Amount.Valid {
+		docAmt = math.Abs(doc.Amount.Float64)
+	}
+	rows, err := db.Query(`
+		SELECT id, location_name, transaction_date, amount,
+		       description, merchant_name, normalized_merchant
+		FROM plaid_transactions
+		WHERE match_status = 'pending'
+		  AND normalized_merchant LIKE $1
+		  AND transaction_date BETWEEN $2 AND $3
+		ORDER BY ABS(amount - $4)
+		LIMIT 20`, "%"+vendorNorm+"%", from, to, docAmt)
+	if err != nil {
+		log.Printf("[MatchEngine] loadTxnsForDirectDoc error: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	txns, _ := scanTxns(rows)
+	return txns
 }
 
 func (h *MatchingEngineHandler) loadTxnsForDateRange(db *sql.DB, minDate, maxDate time.Time) ([]plaidTx, error) {
