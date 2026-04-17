@@ -440,7 +440,7 @@ func (h *DocumentHandler) autoMatchTransaction(amount float64, dateStr, vendorNa
 	rows, err := db.Query(
 		`SELECT id, date, amount, name, vendor FROM transactions
 		 WHERE ABS(amount - $1) < 0.02
-		 AND date BETWEEN $2 AND $3`,
+		 AND date BETWEEN $2::date AND $3::date`,
 		math.Abs(amount), dateFrom, dateTo,
 	)
 	if err != nil {

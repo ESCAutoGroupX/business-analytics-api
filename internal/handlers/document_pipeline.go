@@ -729,9 +729,9 @@ func (h *DocumentHandler) agent4Match(apiKey, vendorName, dateStr string, amount
 		SELECT id, date, amount, name, vendor
 		FROM transactions
 		WHERE ABS(ABS(amount) - $1) < ($1 * 0.05 + 0.01)
-		  AND date BETWEEN ($2::date - INTERVAL '14 days')::text AND ($2::date + INTERVAL '14 days')::text
+		  AND date BETWEEN ($2::date - INTERVAL '14 days')::date AND ($2::date + INTERVAL '14 days')::date
 		  AND ($3 = '' OR name ILIKE '%' || $3 || '%' OR merchant_name ILIKE '%' || $3 || '%' OR vendor ILIKE '%' || $3 || '%')
-		ORDER BY ABS(ABS(amount) - $1), ABS(date::date - $2::date)
+		ORDER BY ABS(ABS(amount) - $1), ABS(date - $2::date)
 		LIMIT 10
 	`, amount, dateStr, vendorName)
 	if err != nil {
