@@ -800,7 +800,7 @@ func (h *MatchingEngineHandler) groupStatementPages(db *sql.DB) []statementGroup
 		if !g.DocDate.IsZero() {
 			periodEnd := g.DocDate.AddDate(0, 0, 7)
 			h.upsertStatementPeriod(db, g.VendorID, g.LocationName,
-				g.DocDate, periodEnd, g.DocumentTotal, g.ComputedTotal, g.Completeness)
+				g.DocDate, periodEnd, g.DocumentTotal, g.ComputedTotal, "open")
 			db.Exec(`UPDATE statement_periods SET completeness_status = $1,
 				customer_number = $2, page_count = $3, computed_total = $4
 				WHERE vendor_id = $5 AND location_name = $6 AND period_start = $7`,

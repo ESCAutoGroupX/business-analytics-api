@@ -54,6 +54,8 @@ type PlaidItem struct {
 	Cursor          string    `gorm:"column:cursor" json:"-"`
 	InstitutionID   string    `gorm:"column:institution_id" json:"institution_id"`
 	InstitutionName string    `gorm:"column:institution_name" json:"institution_name"`
+	NeedsReauth     bool      `gorm:"column:needs_reauth;default:false" json:"needs_reauth"`
+	LastError       string    `gorm:"column:last_error" json:"last_error,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }

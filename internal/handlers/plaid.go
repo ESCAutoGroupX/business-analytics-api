@@ -89,10 +89,44 @@ func (h *PlaidHandler) plaidRequest(endpoint string, body interface{}) (map[stri
 		if msg, ok := result["error_message"].(string); ok {
 			detail = msg
 		}
+		if code, ok := result["error_code"].(string); ok && code != "" {
+			return nil, fmt.Errorf("%s: %s", code, detail)
+		}
 		return nil, fmt.Errorf("%s", detail)
 	}
 
 	return result, nil
+}
+
+// AutoMigrate adds optional columns used for tracking item auth state.
+func (h *PlaidHandler) AutoMigrate() {
+	h.GormDB.Exec(`ALTER TABLE plaid_items ADD COLUMN IF NOT EXISTS needs_reauth BOOLEAN NOT NULL DEFAULT FALSE`)
+	h.GormDB.Exec(`ALTER TABLE plaid_items ADD COLUMN IF NOT EXISTS last_error VARCHAR`)
+}
+
+// isReauthError returns true if err is a Plaid item-level auth failure
+// that requires the user to re-link via Link update mode.
+func isReauthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "ITEM_LOGIN_REQUIRED") ||
+		strings.Contains(msg, "PENDING_EXPIRATION") ||
+		strings.Contains(msg, "PENDING_DISCONNECT") ||
+		strings.Contains(msg, "the login details of this item have changed")
+}
+
+// markItemNeedsReauth flags a plaid_item row as needing re-authentication.
+// Safe to call for legacy rows with no ID (ID <= 0) — they are ignored.
+func (h *PlaidHandler) markItemNeedsReauth(item *models.PlaidItem, reason string) {
+	if item == nil || item.ID <= 0 {
+		return
+	}
+	h.GormDB.Model(&models.PlaidItem{}).Where("id = ?", item.ID).Updates(map[string]interface{}{
+		"needs_reauth": true,
+		"last_error":   reason,
+	})
 }
 
 // POST /plaid/exchange_public_token
@@ -179,7 +213,7 @@ func (h *PlaidHandler) FetchTransactions(c *gin.Context) {
 
 	// Query all plaid_items (company-wide — all users see the same transactions)
 	var items []models.PlaidItem
-	if err := h.GormDB.Find(&items).Error; err != nil {
+	if err := h.GormDB.Where("needs_reauth = FALSE OR needs_reauth IS NULL").Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query plaid items"})
 		return
 	}
@@ -199,13 +233,16 @@ func (h *PlaidHandler) FetchTransactions(c *gin.Context) {
 	var allAccounts []interface{}
 	var allTransactions []interface{}
 
-	for _, item := range items {
+	for i, item := range items {
 		result, err := h.plaidRequest("/transactions/get", map[string]interface{}{
 			"access_token": item.AccessToken,
 			"start_date":   req.StartDate,
 			"end_date":     req.EndDate,
 		})
 		if err != nil {
+			if isReauthError(err) {
+				h.markItemNeedsReauth(&items[i], err.Error())
+			}
 			log.Printf("WARN: failed to fetch transactions for item %s: %v", item.ItemID, err)
 			continue
 		}
@@ -228,7 +265,7 @@ func (h *PlaidHandler) FetchTransactions(c *gin.Context) {
 func (h *PlaidHandler) SyncTransactions(c *gin.Context) {
 	// Query all plaid_items (company-wide — all users see the same transactions)
 	var items []models.PlaidItem
-	if err := h.GormDB.Find(&items).Error; err != nil {
+	if err := h.GormDB.Where("needs_reauth = FALSE OR needs_reauth IS NULL").Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to query plaid items"})
 		return
 	}
@@ -263,6 +300,9 @@ func (h *PlaidHandler) SyncTransactions(c *gin.Context) {
 
 		result, err := h.plaidRequest("/transactions/sync", reqBody)
 		if err != nil {
+			if isReauthError(err) {
+				h.markItemNeedsReauth(&items[i], err.Error())
+			}
 			log.Printf("WARN: failed to sync transactions for item %s: %v", item.ItemID, err)
 			continue
 		}
@@ -372,7 +412,7 @@ func (h *PlaidHandler) DeletePlaidItem(c *gin.Context) {
 // a NULL/empty cursor get an initial full sync (up to 730 days).
 func (h *PlaidHandler) SyncPlaidTransactions() {
 	var items []models.PlaidItem
-	if err := h.GormDB.Find(&items).Error; err != nil {
+	if err := h.GormDB.Where("needs_reauth = FALSE OR needs_reauth IS NULL").Find(&items).Error; err != nil {
 		log.Printf("PlaidSync: failed to query plaid_items: %v", err)
 		return
 	}
@@ -395,7 +435,12 @@ func (h *PlaidHandler) SyncPlaidTransactions() {
 
 			result, err := h.plaidRequest("/transactions/sync", reqBody)
 			if err != nil {
-				log.Printf("PlaidSync: %s (id=%d): API error: %v", item.InstitutionName, item.ID, err)
+				if isReauthError(err) {
+					h.markItemNeedsReauth(&items[i], err.Error())
+					log.Printf("PlaidSync: %s (id=%d): marked needs_reauth: %v", item.InstitutionName, item.ID, err)
+				} else {
+					log.Printf("PlaidSync: %s (id=%d): API error: %v", item.InstitutionName, item.ID, err)
+				}
 				break
 			}
 

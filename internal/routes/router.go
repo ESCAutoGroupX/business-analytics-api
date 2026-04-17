@@ -20,6 +20,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	assetHandler := &handlers.AssetHandler{GormDB: gormDB}
 	userHandler := &handlers.UserHandler{GormDB: gormDB}
 	plaidHandler := &handlers.PlaidHandler{GormDB: gormDB, Cfg: cfg}
+	plaidHandler.AutoMigrate()
 	cardAssignmentHandler := &handlers.CardAssignmentHandler{GormDB: gormDB}
 	xeroHandler := &handlers.XeroHandler{GormDB: gormDB, Cfg: cfg}
 	xeroSyncHandler := &handlers.XeroSyncHandler{GormDB: gormDB, Cfg: cfg}
@@ -116,8 +117,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		vendors := protected.Group("/vendors")
 		{
             vendors.POST("/import", vendorHandler.ImportVendors)
-			vendors.POST("/", vendorHandler.CreateVendor)
-			vendors.GET("/", vendorHandler.ListVendors)
+			vendors.POST("", vendorHandler.CreateVendor)
+			vendors.GET("", vendorHandler.ListVendors)
 			vendors.GET("/lookup", vendorHandler.LookupVendor)
 			vendors.GET("/:vendor_id", vendorHandler.GetVendor)
 			vendors.PATCH("/:vendor_id", vendorHandler.PatchVendor)
@@ -127,8 +128,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Permissions & Roles
 		perms := protected.Group("/api/permissions")
 		{
-			perms.POST("/", permissionHandler.CreatePermission)
-			perms.GET("/", permissionHandler.GetAllPermissions)
+			perms.POST("", permissionHandler.CreatePermission)
+			perms.GET("", permissionHandler.GetAllPermissions)
 			perms.POST("/roles", permissionHandler.CreateRole)
 			perms.GET("/roles", permissionHandler.GetAllRoles)
 			perms.GET("/roles/:role_id", permissionHandler.GetRole)
@@ -138,18 +139,18 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Assets
 		assets := protected.Group("/assets")
 		{
-			assets.POST("/", assetHandler.CreateAsset)
-			assets.GET("/", assetHandler.GetAllAssets)
+			assets.POST("", assetHandler.CreateAsset)
+			assets.GET("", assetHandler.GetAllAssets)
 			assets.GET("/:asset_id", assetHandler.GetAsset)
 			assets.PATCH("/:asset_id", assetHandler.UpdateAsset)
 			assets.DELETE("/:asset_id", assetHandler.DeleteAsset)
 		}
 
 		// Users
-		protected.GET("/users", userHandler.ListUsers)
-		protected.POST("/users", userHandler.CreateUser)
 		users := protected.Group("/users")
 		{
+			users.GET("", userHandler.ListUsers)
+			users.POST("", userHandler.CreateUser)
 			users.GET("/me", userHandler.GetMyProfile)
 			users.PATCH("/me", userHandler.EditMyProfile)
 			users.POST("/me/change-password", userHandler.ChangePassword)
@@ -214,8 +215,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Card Assignments
 		cardAssignments := protected.Group("/card-assignments")
 		{
-			cardAssignments.GET("/", cardAssignmentHandler.ListCardAssignments)
-			cardAssignments.POST("/", cardAssignmentHandler.CreateCardAssignment)
+			cardAssignments.GET("", cardAssignmentHandler.ListCardAssignments)
+			cardAssignments.POST("", cardAssignmentHandler.CreateCardAssignment)
 			cardAssignments.PUT("/:id", cardAssignmentHandler.UpdateCardAssignment)
 			cardAssignments.DELETE("/:id", cardAssignmentHandler.DeleteCardAssignment)
 		}
@@ -223,8 +224,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Payment Methods
 		pm := protected.Group("/payment-methods")
 		{
-			pm.POST("/", paymentMethodHandler.CreatePaymentMethod)
-			pm.GET("/", paymentMethodHandler.ListPaymentMethods)
+			pm.POST("", paymentMethodHandler.CreatePaymentMethod)
+			pm.GET("", paymentMethodHandler.ListPaymentMethods)
 			pm.GET("/:payment_method_id", paymentMethodHandler.GetPaymentMethod)
 			pm.PATCH("/:payment_method_id", paymentMethodHandler.UpdatePaymentMethod)
 			pm.DELETE("/:payment_method_id", paymentMethodHandler.DeletePaymentMethod)
@@ -234,8 +235,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		cards := protected.Group("/cards")
 		{
 			cards.GET("/custom-cycle", cardHandler.GetCustomCycleCards)
-			cards.POST("/", cardHandler.CreateCard)
-			cards.GET("/", cardHandler.GetAllCards)
+			cards.POST("", cardHandler.CreateCard)
+			cards.GET("", cardHandler.GetAllCards)
 			cards.GET("/:card_id", cardHandler.GetCard)
 			cards.PATCH("/:card_id", cardHandler.UpdateCard)
 			cards.DELETE("/:card_id", cardHandler.DeleteCard)
@@ -251,8 +252,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Accounting (Chart of Accounts)
 		accounting := protected.Group("/accounting")
 		{
-			accounting.POST("/", accountingHandler.CreateAccount)
-			accounting.GET("/", accountingHandler.ListAccounts)
+			accounting.POST("", accountingHandler.CreateAccount)
+			accounting.GET("", accountingHandler.ListAccounts)
 			accounting.POST("/import-accounts/", accountingHandler.ImportAccounts)
 			accounting.GET("/:account_id", accountingHandler.GetAccount)
 			accounting.PATCH("/:account_id", accountingHandler.UpdateAccount)
@@ -262,8 +263,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Payroll
 		payroll := protected.Group("/payroll")
 		{
-			payroll.POST("/", payrollHandler.CreatePayroll)
-			payroll.GET("/", payrollHandler.GetAllPayrolls)
+			payroll.POST("", payrollHandler.CreatePayroll)
+			payroll.GET("", payrollHandler.GetAllPayrolls)
 			payroll.POST("/adjustments", payrollHandler.CreateAdjustment)
 			payroll.GET("/adjustments", payrollHandler.ListAdjustments)
 			payroll.GET("/adjustments/:adjustment_id", payrollHandler.GetAdjustment)
@@ -284,8 +285,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Transactions
 		transactions := protected.Group("/transactions")
 		{
-			transactions.POST("/", transactionHandler.CreateTransaction)
-			transactions.GET("/", transactionHandler.ListTransactions)
+			transactions.POST("", transactionHandler.CreateTransaction)
+			transactions.GET("", transactionHandler.ListTransactions)
 			transactions.POST("/import-data", transactionHandler.ImportData)
 			transactions.POST("/reverse-change", transactionHandler.ReverseChange)
 			transactions.PUT("/liability-minimum-balance/:liability_id", transactionHandler.UpdateLiabilityMinimumBalance)
@@ -324,8 +325,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// PayBills
 		paybills := protected.Group("/paybills")
 		{
-			paybills.POST("/", paybillHandler.CreatePayBill)
-			paybills.GET("/", paybillHandler.ListPayBills)
+			paybills.POST("", paybillHandler.CreatePayBill)
+			paybills.GET("", paybillHandler.ListPayBills)
 			paybills.POST("/schedule-payment/", paybillHandler.CreateSchedulePayment)
 			paybills.GET("/schedule-payment/", paybillHandler.ListSchedulePayments)
 			paybills.GET("/schedule-payment/:schedule_payment_id", paybillHandler.GetSchedulePayment)
@@ -360,7 +361,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		docs := protected.Group("/documents")
 		{
 			docs.POST("/upload", documentHandler.Upload)
-			docs.GET("/", documentHandler.List)
+			docs.GET("", documentHandler.List)
 			docs.GET("/summary", documentHandler.Summary)
 			docs.POST("/rescan-all", documentHandler.RescanAll)
 			docs.GET("/rescan-status", documentHandler.RescanStatus)
@@ -380,7 +381,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Accounts Payable
 		ap := protected.Group("/ap")
 		{
-			ap.GET("/", apHandler.ListEntries)
+			ap.GET("", apHandler.ListEntries)
 			ap.GET("/aging", apHandler.AgingReport)
 			ap.GET("/:id", apHandler.GetEntry)
 			ap.POST("/:id/authorize", apHandler.Authorize)
@@ -399,15 +400,15 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Receivables & Credits
 		receivables := protected.Group("/receivables")
 		{
-			receivables.POST("/", receivablesHandler.CreateReceivable)
-			receivables.GET("/", receivablesHandler.ListReceivables)
+			receivables.POST("", receivablesHandler.CreateReceivable)
+			receivables.GET("", receivablesHandler.ListReceivables)
 			receivables.GET("/aging", receivablesHandler.AgingReport)
 			receivables.PATCH("/:id", receivablesHandler.PatchReceivable)
 		}
 		credits := protected.Group("/credits")
 		{
-			credits.POST("/", receivablesHandler.CreateCredit)
-			credits.GET("/", receivablesHandler.ListCredits)
+			credits.POST("", receivablesHandler.CreateCredit)
+			credits.GET("", receivablesHandler.ListCredits)
 			credits.POST("/:id/apply", receivablesHandler.ApplyCredit)
 		}
 
@@ -435,8 +436,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		// Locations
 		locations := protected.Group("/locations")
 		{
-			locations.POST("/", locationHandler.CreateLocation)
-			locations.GET("/", locationHandler.GetAllLocations)
+			locations.POST("", locationHandler.CreateLocation)
+			locations.GET("", locationHandler.GetAllLocations)
 			locations.POST("/shop-info/", locationHandler.CreateShopInfo)
 			locations.GET("/shop-info/", locationHandler.GetAllShopInfos)
 			locations.GET("/shop-info/:shop_info_id", locationHandler.GetShopInfo)
