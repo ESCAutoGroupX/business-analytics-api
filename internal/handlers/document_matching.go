@@ -602,11 +602,31 @@ func (h *DocumentMatchHandler) applyMatch(doc models.Document, bestTx *models.Tr
 		atomic.AddInt32(&matchAllSuspect, 1)
 	}
 
-	h.GormDB.Model(bestTx).Updates(map[string]interface{}{
+	txUpdates := map[string]interface{}{
 		"matched_document_id":   doc.ID,
 		"document_match_score":  bestScore,
 		"document_match_status": status,
-	})
+	}
+
+	// Fill ocr_vendor_name when the transaction's own name/merchant does not
+	// already carry the vendor. Helps the ledger show the real vendor even
+	// when the Plaid description is a generic "NET SETLMT …" line.
+	if doc.VendorName != nil && *doc.VendorName != "" {
+		vn := strings.ToLower(*doc.VendorName)
+		hasVendor := false
+		if bestTx.MerchantName != nil && strings.Contains(strings.ToLower(*bestTx.MerchantName), vn) {
+			hasVendor = true
+		}
+		if bestTx.Name != nil && strings.Contains(strings.ToLower(*bestTx.Name), vn) {
+			hasVendor = true
+		}
+		if !hasVendor {
+			txUpdates["ocr_vendor_name"] = *doc.VendorName
+			txUpdates["ocr_vendor_source"] = "document_match"
+		}
+	}
+
+	h.GormDB.Model(bestTx).Updates(txUpdates)
 
 	if status == "matched" {
 		h.GormDB.Model(&doc).Update("status", "auto_matched")

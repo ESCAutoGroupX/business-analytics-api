@@ -209,6 +209,8 @@ type Transaction struct {
 	MatchedDocumentID        *int       `gorm:"column:matched_document_id" json:"matched_document_id"`
 	DocumentMatchScore       *int       `gorm:"column:document_match_score" json:"document_match_score"`
 	DocumentMatchStatus      *string    `gorm:"column:document_match_status;default:none" json:"document_match_status"`
+	OCRVendorName            *string    `gorm:"column:ocr_vendor_name" json:"ocr_vendor_name"`
+	OCRVendorSource          *string    `gorm:"column:ocr_vendor_source" json:"ocr_vendor_source"`
 	CreatedAt                time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt                time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }
@@ -852,6 +854,7 @@ type Document struct {
 	WFCategory           *string    `gorm:"column:wf_category" json:"wf_category"`
 	WickedFileSent       bool       `gorm:"column:wickedfile_sent;default:false" json:"wickedfile_sent"`
 	WickedFileSentAt     *time.Time `gorm:"column:wickedfile_sent_at" json:"wickedfile_sent_at"`
+	WfID                 *string    `gorm:"column:wf_id" json:"wf_id"`
 	CreatedAt            time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt            time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }

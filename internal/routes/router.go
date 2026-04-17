@@ -49,6 +49,13 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	receivablesHandler.AutoMigrate()
 	docMatchHandler := &handlers.DocumentMatchHandler{GormDB: gormDB}
 	docMatchHandler.AutoMigrate()
+	bulkImportHandler := &handlers.BulkImportHandler{
+		GormDB:   gormDB,
+		Cfg:      cfg,
+		Pipeline: documentHandler,
+		Matcher:  docMatchHandler,
+	}
+	bulkImportHandler.AutoMigrate()
 	dashboardLayoutHandler := &handlers.DashboardLayoutHandler{GormDB: gormDB}
 	notificationHandler := &handlers.NotificationHandler{
 		Email: &notifications.EmailSender{GormDB: gormDB, Cfg: cfg},
@@ -367,6 +374,10 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			docs.GET("/rescan-status", documentHandler.RescanStatus)
 			docs.POST("/match-all", docMatchHandler.MatchAll)
 			docs.GET("/match-status", docMatchHandler.MatchStatus)
+			docs.POST("/bulk-import-wf", bulkImportHandler.BulkImportWF)
+			docs.GET("/bulk-import-status", bulkImportHandler.BulkImportStatus)
+			docs.POST("/bulk-ocr", bulkImportHandler.BulkOCR)
+			docs.GET("/bulk-ocr-status", bulkImportHandler.BulkOCRStatus)
 			docs.GET("/vendor-corrections", documentHandler.ListVendorCorrections)
 			docs.GET("/:id", documentHandler.Get)
 			docs.PATCH("/:id", documentHandler.Update)
