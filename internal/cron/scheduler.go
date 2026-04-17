@@ -55,6 +55,14 @@ func Start(gormDB *gorm.DB, cfg *config.Config) *cron.Cron {
 	docMatchHandler := &handlers.DocumentMatchHandler{GormDB: gormDB}
 	c.AddFunc("*/30 * * * *", wrapSimpleJob("doc-auto-match", docMatchHandler.MatchDocumentsToTransactions))
 
+	// Daily at 2:30am: extract customer numbers from new statement PDFs, then resolve locations
+	c.AddFunc("30 2 * * *", wrapSimpleJob("customer-number-extract", func() {
+		handlers.BackfillCustomerNumbersSync(gormDB, cfg)
+	}))
+	c.AddFunc("35 2 * * *", wrapSimpleJob("resolve-locations", func() {
+		handlers.ResolveLocationsSync(gormDB, cfg)
+	}))
+
 	c.Start()
 	log.Println("Cron scheduler started (sync + snapshots + alerts)")
 

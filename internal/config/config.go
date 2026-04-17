@@ -36,6 +36,7 @@ type Config struct {
 	SMSAPIBaseURL          string
 	SMSAPIEmail            string
 	SMSAPIPassword         string
+	PDFDir                 string
 }
 
 func Load() *Config {
@@ -77,5 +78,13 @@ func Load() *Config {
 		SMSAPIBaseURL:          os.Getenv("SMS_API_BASE_URL"),
 		SMSAPIEmail:            os.Getenv("SMS_API_EMAIL"),
 		SMSAPIPassword:         os.Getenv("SMS_API_PASSWORD"),
+		PDFDir:                 pdfDir(),
 	}
+}
+
+func pdfDir() string {
+	if d := os.Getenv("WF_PDF_DIR"); d != "" {
+		return d
+	}
+	return "/var/www/html/wf-pdfs"
 }

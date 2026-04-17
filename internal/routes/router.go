@@ -145,13 +145,13 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		}
 
 		// Users
+		protected.GET("/users", userHandler.ListUsers)
+		protected.POST("/users", userHandler.CreateUser)
 		users := protected.Group("/users")
 		{
 			users.GET("/me", userHandler.GetMyProfile)
 			users.PATCH("/me", userHandler.EditMyProfile)
 			users.POST("/me/change-password", userHandler.ChangePassword)
-			users.GET("/", userHandler.ListUsers)
-			users.POST("/", userHandler.CreateUser)
 			users.GET("/:user_id", userHandler.GetUser)
 			users.PATCH("/:user_id", userHandler.PatchUser)
 			users.POST("/:user_id/reset-password", userHandler.ResetUserPassword)
@@ -297,11 +297,27 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 
 		// Admin
 		matchingEngineHandler := &handlers.MatchingEngineHandler{GormDB: gormDB}
+		custNumExtractor := &handlers.CustomerNumberExtractor{GormDB: gormDB, Cfg: cfg}
+		visionExtractor := &handlers.VisionExtractor{GormDB: gormDB, Cfg: cfg}
 		admin := protected.Group("/admin")
 		{
 			admin.POST("/migrate-plaid-transactions", transactionHandler.MigratePlaidTransactions)
 			admin.POST("/run-matching", matchingEngineHandler.RunMatching)
 			admin.GET("/match-stats", matchingEngineHandler.MatchStats)
+			admin.GET("/statement-completeness", matchingEngineHandler.StatementCompleteness)
+			admin.POST("/vendor-location-accounts", matchingEngineHandler.CreateVendorLocationAccount)
+			admin.GET("/vendor-location-accounts", matchingEngineHandler.ListVendorLocationAccounts)
+			admin.POST("/extract-customer-numbers", custNumExtractor.StartExtraction)
+			admin.GET("/extract-customer-numbers/status", custNumExtractor.GetExtractionStatus)
+			admin.POST("/extract-customer-numbers/assign/:doc_id", custNumExtractor.AssignCustomerNumber)
+			admin.POST("/resolve-locations-from-customer-numbers", custNumExtractor.ResolveLocations)
+			admin.GET("/customer-number-stats", custNumExtractor.CustomerNumberStats)
+			admin.POST("/vision-extract-statements", visionExtractor.StartVisionExtraction)
+			admin.GET("/vision-extract-statements/status", visionExtractor.GetVisionExtractionStatus)
+			admin.POST("/vision-extract-statements/test/:doc_id", visionExtractor.TestVisionSingleDoc)
+			admin.POST("/vision-extract-amounts", visionExtractor.ExtractAmounts)
+			admin.GET("/missing-pages-review", matchingEngineHandler.MissingPagesReview)
+			admin.POST("/statements/:group_id/force-match", matchingEngineHandler.ForceMatchStatement)
 		}
 
 		// PayBills
@@ -357,6 +373,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			docs.POST("/:id/reprocess", documentHandler.Reprocess)
 			docs.POST("/:id/record-payment", documentHandler.RecordPayment)
 			docs.GET("/:id/file", documentHandler.ServeFile)
+			docs.GET("/:id/pdf", documentHandler.ServePDF)
 		}
 
 		// Accounts Payable

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -74,6 +75,21 @@ type stmtLineItem struct {
 	Date      string  `json:"date"`
 }
 
+// statementGroup represents pages of a multi-page statement grouped together.
+type statementGroup struct {
+	VendorID       string
+	VendorName     string
+	LocationName   string
+	CustomerNumber string
+	DocDate        time.Time
+	Pages          []wfDoc
+	AllLineItems   []stmtLineItem
+	ComputedTotal  float64
+	DocumentTotal  float64
+	HasDocTotal    bool
+	Completeness   string // "complete", "missing_pages", "no_total_found"
+}
+
 const matchThreshold = 55.0 // TODO: raise back to 75 after tuning
 const docBatchSize = 500
 const txBatchLimit = 2000
@@ -98,13 +114,29 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	// ── Pre-flight migrations ───────────────────────────────────
 	db.Exec(`ALTER TABLE vendor_aliases ADD COLUMN IF NOT EXISTS location_name VARCHAR`)
 	db.Exec(`ALTER TABLE match_results DROP CONSTRAINT IF EXISTS match_results_match_type_check`)
-	db.Exec(`ALTER TABLE match_results ADD CONSTRAINT match_results_match_type_check CHECK (match_type IN ('auto', 'manual', 'ai_tiebreak', 'auto_multi_pay', 'auto_multi_pay_partial', 'auto_statement_group'))`)
+	db.Exec(`ALTER TABLE match_results ADD CONSTRAINT match_results_match_type_check CHECK (match_type IN ('auto', 'manual', 'ai_tiebreak', 'auto_multi_pay', 'auto_multi_pay_partial', 'auto_statement_group', 'auto_utility'))`)
 	db.Exec(`ALTER TABLE statement_periods DROP CONSTRAINT IF EXISTS statement_periods_status_check`)
 	db.Exec(`ALTER TABLE statement_periods ADD CONSTRAINT statement_periods_status_check CHECK (status IN ('open', 'reconciled', 'discrepancy', 'fully_matched', 'partial'))`)
 	db.Exec(`ALTER TABLE statement_periods ADD COLUMN IF NOT EXISTS location_name VARCHAR(100)`)
 	db.Exec(`DROP INDEX IF EXISTS idx_stmt_periods_vendor_start`)
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_stmt_periods_vendor_location_start ON statement_periods (vendor_id, location_name, period_start)`)
 	db.Exec(`ALTER TABLE wf_documents ADD COLUMN IF NOT EXISTS matched_statement_id UUID`)
+
+	// vendor_location_accounts table
+	db.Exec(`CREATE TABLE IF NOT EXISTS vendor_location_accounts (
+		id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		vendor_id       UUID NOT NULL REFERENCES vendors(id),
+		customer_number VARCHAR(50) NOT NULL,
+		location_name   VARCHAR(100) NOT NULL,
+		notes           VARCHAR(255),
+		created_at      TIMESTAMP DEFAULT NOW(),
+		UNIQUE(vendor_id, customer_number)
+	)`)
+	// statement_periods new columns for page grouping
+	db.Exec(`ALTER TABLE statement_periods ADD COLUMN IF NOT EXISTS completeness_status VARCHAR(20) DEFAULT 'unknown'`)
+	db.Exec(`ALTER TABLE statement_periods ADD COLUMN IF NOT EXISTS customer_number VARCHAR(50)`)
+	db.Exec(`ALTER TABLE statement_periods ADD COLUMN IF NOT EXISTS page_count INTEGER`)
+	db.Exec(`ALTER TABLE statement_periods ADD COLUMN IF NOT EXISTS computed_total DECIMAL(12,2)`)
 
 	if _, err := db.Exec(`INSERT INTO vendor_aliases (id, vendor_id, alias, source, location_name)
 		SELECT gen_random_uuid(), v.id, 'rsr auto parts', 'manual', 'Highlands'
@@ -151,9 +183,29 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 	var allErrors []string
 
 	// ═══════════════════════════════════════════════════════════════
-	// PHASE 1: STATEMENT MATCHING — invoice number approach
+	// PRE-STEP: STATEMENT PAGE GROUPING
 	// ═══════════════════════════════════════════════════════════════
-	stmtMatched, stmtUnmatched, stmtErrs := h.matchStatements(db, aliases, consumed)
+	groups := h.groupStatementPages(db)
+	completeGroups := 0
+	missingGroups := 0
+	noTotalGroups := 0
+	for _, g := range groups {
+		switch g.Completeness {
+		case "complete":
+			completeGroups++
+		case "missing_pages":
+			missingGroups++
+		case "no_total_found":
+			noTotalGroups++
+		}
+	}
+	log.Printf("[MatchEngine] Statement page grouping: %d groups (%d complete, %d missing_pages, %d no_total_found)",
+		len(groups), completeGroups, missingGroups, noTotalGroups)
+
+	// ═══════════════════════════════════════════════════════════════
+	// PHASE 1: STATEMENT MATCHING — grouped pages, invoice number approach
+	// ═══════════════════════════════════════════════════════════════
+	stmtMatched, stmtUnmatched, stmtErrs := h.matchStatementGroups(db, aliases, consumed, groups)
 	totalMatched += stmtMatched
 	totalStmtGroup += stmtMatched
 	totalUnmatched += stmtUnmatched
@@ -200,7 +252,7 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 				continue
 			}
 
-			txns := h.loadTxnsForDirectDoc(db, doc, vendorNorm)
+			txns := h.loadTxnsForDirectDoc(db, doc, vendorNorm, aliases)
 
 			var bestTx *plaidTx
 			var bestScore scoreBreakdown
@@ -243,16 +295,37 @@ func (h *MatchingEngineHandler) RunMatching(c *gin.Context) {
 		}
 	}
 
-	log.Printf("[MatchEngine] Done: %d processed, %d matched (stmt=%d, multi=%d), %d unmatched, %d errors",
-		totalMatched+totalUnmatched, totalMatched, totalStmtGroup, totalMultiPay, totalUnmatched, len(allErrors))
+	// ═══════════════════════════════════════════════════════════════
+	// PHASE 3: UTILITY/DIRECT-PAY VENDORS — no completeness check
+	// ═══════════════════════════════════════════════════════════════
+	totalUtility := 0
+	utilMatched, utilUnmatched, utilErrs := h.matchUtilityVendors(db, aliases, consumed)
+	totalMatched += utilMatched
+	totalUtility = utilMatched
+	totalUnmatched += utilUnmatched
+	allErrors = append(allErrors, utilErrs...)
+
+	// ═══════════════════════════════════════════════════════════════
+	// PHASE 4: CASCADE CHILD DOCUMENTS (invoices, RMAs, credits)
+	// ═══════════════════════════════════════════════════════════════
+	invCascaded, rmaCascaded, creditCascaded, cascadeErrs := h.cascadeChildDocuments(db)
+	totalMatched += invCascaded + rmaCascaded + creditCascaded
+	allErrors = append(allErrors, cascadeErrs...)
+
+	log.Printf("[MatchEngine] Done: %d matched (stmt=%d, utility=%d, inv_cascade=%d, rma_cascade=%d, credit_cascade=%d), %d unmatched, %d errors",
+		totalMatched, totalStmtGroup, totalUtility, invCascaded, rmaCascaded, creditCascaded, totalUnmatched, len(allErrors))
 
 	c.JSON(http.StatusOK, gin.H{
-		"processed":         totalMatched + totalUnmatched,
-		"matched":           totalMatched,
-		"unmatched":         totalUnmatched,
-		"statement_grouped": totalStmtGroup,
-		"multi_pay_matched": totalMultiPay,
-		"errors":            allErrors,
+		"processed":          totalMatched + totalUnmatched,
+		"matched":            totalMatched,
+		"unmatched":          totalUnmatched,
+		"statement_grouped":  totalStmtGroup,
+		"multi_pay_matched":  totalMultiPay,
+		"utility_matched":    totalUtility,
+		"invoices_cascaded":  invCascaded,
+		"rmas_cascaded":      rmaCascaded,
+		"credits_cascaded":   creditCascaded,
+		"errors":             allErrors,
 	})
 }
 
@@ -627,6 +700,836 @@ func (h *MatchingEngineHandler) fallbackInvoicesByDateRange(db *sql.DB, stmt wfD
 }
 
 // ═══════════════════════════════════════════════════════════════
+// STATEMENT PAGE GROUPING
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) groupStatementPages(db *sql.DB) []statementGroup {
+	stmts, err := h.loadPendingStatements(db)
+	if err != nil {
+		log.Printf("[MatchEngine] groupStatementPages load error: %v", err)
+		return nil
+	}
+
+	type gKey struct {
+		VendorID, Location, Date string
+	}
+	groupMap := map[gKey]*statementGroup{}
+	var groupOrder []gKey
+
+	for _, stmt := range stmts {
+		if !stmt.VendorID.Valid {
+			continue
+		}
+		loc := ""
+		if stmt.LocationName.Valid {
+			loc = stmt.LocationName.String
+		}
+		dateStr := ""
+		if stmt.DocDate.Valid {
+			dateStr = stmt.DocDate.Time.Format("2006-01-02")
+		}
+		key := gKey{stmt.VendorID.String, loc, dateStr}
+
+		g, exists := groupMap[key]
+		if !exists {
+			vendorName := ""
+			if stmt.VendorNorm.Valid {
+				vendorName = stmt.VendorNorm.String
+			}
+			docDate := time.Time{}
+			if stmt.DocDate.Valid {
+				docDate = stmt.DocDate.Time
+			}
+			g = &statementGroup{
+				VendorID:     stmt.VendorID.String,
+				VendorName:   vendorName,
+				LocationName: loc,
+				DocDate:      docDate,
+			}
+			groupMap[key] = g
+			groupOrder = append(groupOrder, key)
+		}
+		g.Pages = append(g.Pages, stmt)
+
+		if stmt.InvoiceNumber.Valid && stmt.InvoiceNumber.String != "" && g.CustomerNumber == "" {
+			g.CustomerNumber = stmt.InvoiceNumber.String
+		}
+
+		items := h.parseStatementLineItems(db, stmt)
+		g.AllLineItems = append(g.AllLineItems, items...)
+
+		if stmt.Amount.Valid {
+			g.DocumentTotal = stmt.Amount.Float64 // keep sign — credits are negative
+			g.HasDocTotal = true
+		}
+	}
+
+	var groups []statementGroup
+	for _, key := range groupOrder {
+		g := groupMap[key]
+
+		for _, li := range g.AllLineItems {
+			g.ComputedTotal += li.Amount // signed sum: credits are negative, invoices positive
+		}
+		g.ComputedTotal = math.Round(g.ComputedTotal*100) / 100
+
+		if !g.HasDocTotal {
+			g.Completeness = "no_total_found"
+		} else if math.Abs(g.ComputedTotal-g.DocumentTotal) <= 0.01 {
+			g.Completeness = "complete"
+		} else if g.DocumentTotal == 0 && len(g.AllLineItems) > 0 {
+			// Zero-balance statement (e.g., SSF): activity shown but net = $0
+			// No Plaid transaction to match — mark complete so child linking works
+			g.Completeness = "complete"
+		} else {
+			g.Completeness = "missing_pages"
+		}
+
+		// Resolve location from vendor_location_accounts
+		if g.CustomerNumber != "" {
+			var resolvedLoc sql.NullString
+			db.QueryRow(`SELECT location_name FROM vendor_location_accounts
+				WHERE vendor_id = $1 AND customer_number = $2`,
+				g.VendorID, g.CustomerNumber).Scan(&resolvedLoc)
+			if resolvedLoc.Valid && resolvedLoc.String != "" {
+				g.LocationName = resolvedLoc.String
+			}
+		}
+
+		// Record in statement_periods
+		if !g.DocDate.IsZero() {
+			periodEnd := g.DocDate.AddDate(0, 0, 7)
+			h.upsertStatementPeriod(db, g.VendorID, g.LocationName,
+				g.DocDate, periodEnd, g.DocumentTotal, g.ComputedTotal, g.Completeness)
+			db.Exec(`UPDATE statement_periods SET completeness_status = $1,
+				customer_number = $2, page_count = $3, computed_total = $4
+				WHERE vendor_id = $5 AND location_name = $6 AND period_start = $7`,
+				g.Completeness, g.CustomerNumber, len(g.Pages), g.ComputedTotal,
+				g.VendorID, g.LocationName, g.DocDate)
+		}
+
+		groups = append(groups, *g)
+	}
+	return groups
+}
+
+// matchStatementGroups matches complete statement groups to Plaid transactions.
+// Only groups with Completeness == "complete" are matched.
+func (h *MatchingEngineHandler) matchStatementGroups(
+	db *sql.DB, aliases map[string][]vendorAlias, consumed map[string]bool, groups []statementGroup,
+) (matched int, unmatched int, errors []string) {
+
+	for _, g := range groups {
+		if g.Completeness != "complete" {
+			continue
+		}
+
+		// Zero-balance statements: mark all pages as matched (no Plaid tx needed)
+		if g.DocumentTotal == 0 && len(g.AllLineItems) > 0 {
+			now := time.Now()
+			for _, page := range g.Pages {
+				db.Exec(`UPDATE wf_documents SET match_status = 'matched',
+					match_confidence = 100, updated_at = $1
+					WHERE id = $2 AND match_status = 'pending'`,
+					now, page.ID)
+			}
+			matched += len(g.Pages)
+			log.Printf("[MatchEngine] Zero-balance statement: vendor=%s location=%s date=%s, marked %d pages matched",
+				g.VendorName, g.LocationName, g.DocDate.Format("2006-01-02"), len(g.Pages))
+			continue
+		}
+
+		// Pick the page with the amount as the representative doc
+		var repDoc wfDoc
+		for _, p := range g.Pages {
+			if p.Amount.Valid && p.Amount.Float64 != 0 {
+				repDoc = p
+				break
+			}
+		}
+		if repDoc.ID == "" && len(g.Pages) > 0 {
+			repDoc = g.Pages[0]
+		}
+		if repDoc.ID == "" {
+			continue
+		}
+
+		// Override amount with computed_total from all pages
+		repDoc.Amount = sql.NullFloat64{Float64: g.ComputedTotal, Valid: true}
+		if g.LocationName != "" {
+			repDoc.LocationName = sql.NullString{String: g.LocationName, Valid: true}
+		}
+
+		vendorLabel := g.VendorName
+		locationLabel := g.LocationName
+		lineItems := g.AllLineItems
+
+		var matchedInvIDs []string
+		matchedInvTotal := 0.0
+		for _, li := range lineItems {
+			if li.InvoiceID == "" {
+				continue
+			}
+			var invID string
+			var invAmt sql.NullFloat64
+			err := db.QueryRow(`
+				SELECT id, amount FROM wf_documents
+				WHERE vendor_id = $1
+				  AND invoice_number = $2
+				  AND doc_type IN ('invoice', 'credit', 'credit_memo')
+				LIMIT 1`,
+				repDoc.VendorID.String, li.InvoiceID).Scan(&invID, &invAmt)
+			if err == nil && invID != "" {
+				matchedInvIDs = append(matchedInvIDs, invID)
+				matchedInvTotal += math.Abs(li.Amount)
+			}
+		}
+
+		// Fallback: if invoice number matching linked < 50% of line items
+		if len(matchedInvIDs)*2 < len(lineItems) {
+			fallbackIDs, fallbackTotal := h.fallbackInvoicesByDateRange(db, repDoc)
+			if len(fallbackIDs) > 0 {
+				matchedInvIDs = append(matchedInvIDs, fallbackIDs...)
+				matchedInvTotal += fallbackTotal
+				log.Printf("[MatchEngine] Statement group fallback: vendor=%s location=%s found %d invoices",
+					vendorLabel, locationLabel, len(fallbackIDs))
+			}
+		}
+
+		lookupAmount := math.Abs(g.ComputedTotal)
+		if lookupAmount == 0 {
+			lookupAmount = matchedInvTotal
+		}
+		if lookupAmount == 0 && len(matchedInvIDs) == 0 {
+			log.Printf("[MatchEngine] Stmt group SKIPPED: no usable amount for vendor=%s", vendorLabel)
+			unmatched++
+			continue
+		}
+
+		vendorNorm := ""
+		if repDoc.VendorNorm.Valid {
+			vendorNorm = repDoc.VendorNorm.String
+		}
+		if repDoc.DocDate.Valid {
+			log.Printf("[MatchEngine] Stmt group tx lookup: vendor=%s location=%s computed=%.2f lookupAmt=%.2f pages=%d",
+				vendorLabel, locationLabel, g.ComputedTotal, lookupAmount, len(g.Pages))
+		}
+
+		txns := h.loadTxnsForStatement(db, repDoc, vendorNorm, aliases)
+
+		var bestTx *plaidTx
+		var bestScore scoreBreakdown
+		for i := range txns {
+			tx := &txns[i]
+			if consumed[tx.ID] || !tx.Amount.Valid || !tx.TransactionDate.Valid {
+				continue
+			}
+			txAmt := math.Abs(tx.Amount.Float64)
+			s := scoreBreakdown{
+				Amount:   scoreAmount(lookupAmount, txAmt),
+				Vendor:   scoreVendorWithAliases(repDoc, *tx, aliases),
+				Location: scoreLocationMatch(repDoc, *tx),
+			}
+			if repDoc.DocDate.Valid {
+				s.Date = scoreDate(repDoc.DocDate.Time, tx.TransactionDate.Time)
+			}
+			s.Total = s.Amount + s.Date + s.Vendor + s.Invoice + s.Location
+			if s.Total > bestScore.Total {
+				bestScore = s
+				bestTx = tx
+			}
+		}
+
+		if bestTx == nil || bestScore.Total < matchThreshold {
+			unmatched++
+			continue
+		}
+
+		consumed[bestTx.ID] = true
+		now := time.Now()
+
+		if err := h.recordMatch(db, repDoc, *bestTx, bestScore, "auto_statement_group"); err != nil {
+			errors = append(errors, err.Error())
+			unmatched++
+			continue
+		}
+		matched++
+
+		// Mark all other pages in the group as matched
+		for _, page := range g.Pages {
+			if page.ID == repDoc.ID {
+				continue
+			}
+			db.Exec(`UPDATE wf_documents SET match_status = 'matched',
+				matched_transaction_id = $1, matched_statement_id = $2,
+				match_confidence = $3, updated_at = $4
+				WHERE id = $5 AND match_status = 'pending'`,
+				bestTx.ID, repDoc.ID, bestScore.Total, now, page.ID)
+		}
+
+		// Mark matched invoices as linked
+		for _, invID := range matchedInvIDs {
+			db.Exec(`UPDATE wf_documents SET match_status = 'matched',
+				matched_transaction_id = $1, matched_statement_id = $2,
+				match_confidence = $3, updated_at = $4
+				WHERE id = $5 AND match_status = 'pending'`,
+				bestTx.ID, repDoc.ID, bestScore.Total, now, invID)
+			matched++
+		}
+
+		log.Printf("[MatchEngine] Statement group: MATCHED vendor=%s location=%s tx=%s score=%.1f, %d pages, linked %d invoices",
+			vendorLabel, locationLabel, bestTx.ID, bestScore.Total, len(g.Pages), len(matchedInvIDs))
+	}
+	return
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3: UTILITY / DIRECT-PAY VENDOR MATCHING
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) matchUtilityVendors(
+	db *sql.DB, aliases map[string][]vendorAlias, consumed map[string]bool,
+) (matched int, unmatched int, errors []string) {
+
+	rows, err := db.Query(fmt.Sprintf(`SELECT %s
+		FROM wf_documents d
+		JOIN vendors v ON v.id = d.vendor_id
+		WHERE d.match_status = 'pending'
+		  AND d.doc_date > '2020-01-01'
+		  AND d.amount IS NOT NULL
+		  AND d.vendor_id IS NOT NULL
+		  AND v.payment_type IN ('utility', 'subscription')
+		ORDER BY d.doc_date ASC`, docSelectCols))
+	if err != nil {
+		log.Printf("[MatchEngine] utility vendor load error: %v", err)
+		errors = append(errors, err.Error())
+		return
+	}
+	defer rows.Close()
+	var docs []wfDoc
+	for rows.Next() {
+		d, err := scanDoc(rows)
+		if err != nil {
+			errors = append(errors, err.Error())
+			return
+		}
+		docs = append(docs, d)
+	}
+	log.Printf("[MatchEngine] Phase 3 utility vendors: %d pending docs", len(docs))
+
+	for _, doc := range docs {
+		if !doc.Amount.Valid || !doc.DocDate.Valid {
+			unmatched++
+			continue
+		}
+		vendorNorm := ""
+		if doc.VendorNorm.Valid {
+			vendorNorm = strings.ToLower(strings.TrimSpace(doc.VendorNorm.String))
+		}
+		if vendorNorm == "" {
+			unmatched++
+			continue
+		}
+
+		// Wider date window for utility: doc_date - 5 to doc_date + 30
+		from := doc.DocDate.Time.AddDate(0, 0, -5).Format("2006-01-02")
+		to := doc.DocDate.Time.AddDate(0, 0, 30).Format("2006-01-02")
+
+		var patterns []string
+		patterns = append(patterns, vendorNorm)
+		if doc.VendorID.Valid {
+			for _, a := range aliases[doc.VendorID.String] {
+				patterns = append(patterns, a.Alias)
+			}
+		}
+
+		var args []interface{}
+		args = append(args, from, to)
+		var likeConds []string
+		for _, pat := range patterns {
+			args = append(args, "%"+pat+"%")
+			likeConds = append(likeConds, fmt.Sprintf("normalized_merchant LIKE $%d", len(args)))
+		}
+		vendorCond := "(" + strings.Join(likeConds, " OR ") + ")"
+
+		query := fmt.Sprintf(`
+			SELECT id, location_name, transaction_date, amount,
+			       description, merchant_name, normalized_merchant
+			FROM plaid_transactions
+			WHERE match_status = 'pending'
+			  AND transaction_date BETWEEN $1 AND $2
+			  AND %s
+			ORDER BY transaction_date ASC
+			LIMIT 50`, vendorCond)
+
+		txRows, err := db.Query(query, args...)
+		if err != nil {
+			log.Printf("[MatchEngine] utility tx load error: %v", err)
+			unmatched++
+			continue
+		}
+		txns, _ := scanTxns(txRows)
+		txRows.Close()
+
+		var bestTx *plaidTx
+		var bestScore scoreBreakdown
+		for i := range txns {
+			tx := &txns[i]
+			if consumed[tx.ID] || !tx.Amount.Valid || !tx.TransactionDate.Valid {
+				continue
+			}
+			// Utility scoring: amount within 2%, wider date window, vendor match
+			docAmt := math.Abs(doc.Amount.Float64)
+			txAmt := math.Abs(tx.Amount.Float64)
+			var amtScore float64
+			if docAmt > 0 {
+				pctDiff := math.Abs(docAmt-txAmt) / docAmt
+				if pctDiff < 0.001 {
+					amtScore = 25
+				} else if pctDiff <= 0.02 {
+					amtScore = 20
+				} else if pctDiff <= 0.05 {
+					amtScore = 10
+				}
+			}
+
+			s := scoreBreakdown{
+				Amount:   amtScore,
+				Date:     scoreDate(doc.DocDate.Time, tx.TransactionDate.Time),
+				Vendor:   scoreVendorWithAliases(doc, *tx, aliases),
+				Location: scoreLocationMatch(doc, *tx),
+			}
+			s.Total = s.Amount + s.Date + s.Vendor + s.Location
+			if s.Total > bestScore.Total {
+				bestScore = s
+				bestTx = tx
+			}
+		}
+
+		if bestTx != nil && bestScore.Total >= matchThreshold {
+			if err := h.recordMatch(db, doc, *bestTx, bestScore, "auto_utility"); err != nil {
+				errors = append(errors, err.Error())
+				continue
+			}
+			consumed[bestTx.ID] = true
+			matched++
+		} else {
+			unmatched++
+		}
+	}
+	log.Printf("[MatchEngine] Phase 3 utility: %d matched, %d unmatched", matched, unmatched)
+	return
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 4: CASCADE CHILD DOCUMENTS
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) cascadeChildDocuments(db *sql.DB) (invLinked, rmaLinked, creditLinked int, errors []string) {
+	now := time.Now()
+	digitRe := regexp.MustCompile(`[^0-9]`)
+
+	// ── A. Invoice linking ──────────────────────────────────────
+	stmtRows, err := db.Query(`
+		SELECT id, vendor_id, location_name, matched_transaction_id, line_items, doc_date
+		FROM wf_documents
+		WHERE doc_type = 'statement'
+		  AND match_status = 'matched'
+		  AND line_items IS NOT NULL AND line_items::text NOT IN ('null', '[]', '')`)
+	if err != nil {
+		log.Printf("[Cascade] stmt query error: %v", err)
+		errors = append(errors, err.Error())
+		return
+	}
+	defer stmtRows.Close()
+
+	type stmtInfo struct {
+		id, vendorID, location, txID string
+		docDate                       time.Time
+		lineItems                     []stmtLineItem
+	}
+	var stmts []stmtInfo
+	for stmtRows.Next() {
+		var s stmtInfo
+		var loc, txID sql.NullString
+		var rawJSON sql.NullString
+		var docDate sql.NullTime
+		if err := stmtRows.Scan(&s.id, &s.vendorID, &loc, &txID, &rawJSON, &docDate); err != nil {
+			continue
+		}
+		if txID.Valid {
+			s.txID = txID.String
+		}
+		if loc.Valid {
+			s.location = loc.String
+		}
+		if docDate.Valid {
+			s.docDate = docDate.Time
+		}
+		if rawJSON.Valid && rawJSON.String != "" && rawJSON.String != "null" {
+			json.Unmarshal([]byte(rawJSON.String), &s.lineItems)
+		}
+		if len(s.lineItems) > 0 {
+			stmts = append(stmts, s)
+		}
+	}
+
+	log.Printf("[Cascade] Processing %d matched statements for invoice linking", len(stmts))
+
+	for _, stmt := range stmts {
+		for _, li := range stmt.lineItems {
+			if li.InvoiceID == "" {
+				continue
+			}
+
+			var invID string
+
+			// 1. Exact match on invoice_number
+			db.QueryRow(`SELECT id FROM wf_documents
+				WHERE doc_type IN ('invoice', 'credit', 'credit_memo')
+				  AND vendor_id = $1 AND invoice_number = $2
+				  AND match_status = 'pending'
+				LIMIT 1`, stmt.vendorID, li.InvoiceID).Scan(&invID)
+
+			// 2. Numeric suffix match (last 6 digits)
+			if invID == "" {
+				liDigits := digitRe.ReplaceAllString(li.InvoiceID, "")
+				if len(liDigits) >= 6 {
+					suffix := liDigits[len(liDigits)-6:]
+					db.QueryRow(`SELECT id FROM wf_documents
+						WHERE doc_type IN ('invoice', 'credit', 'credit_memo')
+						  AND vendor_id = $1 AND match_status = 'pending'
+						  AND RIGHT(REGEXP_REPLACE(invoice_number, '[^0-9]', '', 'g'), 6) = $2
+						LIMIT 1`, stmt.vendorID, suffix).Scan(&invID)
+				}
+			}
+
+			// 3. Date + amount proximity fallback
+			if invID == "" && li.Amount != 0 {
+				liDate := stmt.docDate
+				if li.Date != "" {
+					if t, err := time.Parse("2006-01-02T15:04:05.000Z", li.Date); err == nil {
+						liDate = t
+					} else if t, err := time.Parse("2006-01-02", li.Date[:10]); err == nil {
+						liDate = t
+					}
+				}
+				fromDate := liDate.AddDate(0, 0, -7).Format("2006-01-02")
+				toDate := liDate.AddDate(0, 0, 7).Format("2006-01-02")
+				absAmt := math.Abs(li.Amount)
+				db.QueryRow(`SELECT id FROM wf_documents
+					WHERE doc_type IN ('invoice', 'credit', 'credit_memo')
+					  AND vendor_id = $1 AND match_status = 'pending'
+					  AND doc_date BETWEEN $2 AND $3
+					  AND ABS(ABS(amount) - $4) / GREATEST($4, 0.01) <= 0.01
+					LIMIT 1`, stmt.vendorID, fromDate, toDate, absAmt).Scan(&invID)
+			}
+
+			confidence := 95.0
+			txID := stmt.txID
+			if invID != "" {
+				db.Exec(`UPDATE wf_documents SET match_status = 'matched',
+					matched_statement_id = $1, matched_transaction_id = $2,
+					match_confidence = $3, updated_at = $4
+					WHERE id = $5 AND match_status = 'pending'`,
+					stmt.id, sql.NullString{String: txID, Valid: txID != ""}, confidence, now, invID)
+				invLinked++
+			}
+		}
+	}
+	log.Printf("[Cascade] Invoices linked: %d", invLinked)
+
+	// ── B. RMA linking — by invoice_number then by amount tiers ─
+
+	// Tier 1: RMA invoice_number matches a matched invoice's invoice_number
+	result, err := db.Exec(`
+		UPDATE wf_documents rma
+		SET match_status = 'matched',
+		    matched_rma_id = inv.id,
+		    matched_transaction_id = inv.matched_transaction_id,
+		    match_confidence = 92,
+		    updated_at = $1
+		FROM wf_documents inv
+		WHERE rma.doc_type = 'rma'
+		  AND rma.match_status = 'pending'
+		  AND rma.invoice_number IS NOT NULL AND rma.invoice_number != ''
+		  AND inv.doc_type IN ('invoice', 'credit', 'credit_memo')
+		  AND inv.match_status = 'matched'
+		  AND inv.vendor_id = rma.vendor_id
+		  AND inv.invoice_number = rma.invoice_number`, now)
+	if err != nil {
+		log.Printf("[Cascade] RMA tier1 error: %v", err)
+		errors = append(errors, err.Error())
+	} else {
+		n, _ := result.RowsAffected()
+		rmaLinked += int(n)
+		log.Printf("[Cascade] RMA tier1 (invoice_number match): %d", n)
+	}
+
+	// Tier 2: Amount within 10%, same vendor+location, within 180 days
+	result, err = db.Exec(`
+		UPDATE wf_documents rma
+		SET match_status = 'matched',
+		    matched_rma_id = inv.id,
+		    matched_transaction_id = inv.matched_transaction_id,
+		    match_confidence = 80,
+		    updated_at = $1
+		FROM wf_documents inv
+		WHERE rma.doc_type = 'rma'
+		  AND rma.match_status = 'pending'
+		  AND inv.doc_type IN ('invoice', 'credit', 'credit_memo')
+		  AND inv.match_status = 'matched'
+		  AND inv.vendor_id = rma.vendor_id
+		  AND inv.location_name = rma.location_name
+		  AND rma.doc_date >= inv.doc_date
+		  AND rma.doc_date <= inv.doc_date + INTERVAL '180 days'
+		  AND inv.amount IS NOT NULL AND ABS(inv.amount) > 0
+		  AND ABS(ABS(rma.amount) - ABS(inv.amount)) / ABS(inv.amount) <= 0.10`, now)
+	if err != nil {
+		log.Printf("[Cascade] RMA tier2 error: %v", err)
+		errors = append(errors, err.Error())
+	} else {
+		n, _ := result.RowsAffected()
+		rmaLinked += int(n)
+		log.Printf("[Cascade] RMA tier2 (amount within 10%%): %d", n)
+	}
+
+	// Tier 3: Same vendor+location, within 14 days, low confidence
+	result, err = db.Exec(`
+		UPDATE wf_documents rma
+		SET match_status = 'matched',
+		    matched_rma_id = inv.id,
+		    matched_transaction_id = inv.matched_transaction_id,
+		    match_confidence = 65,
+		    updated_at = $1
+		FROM wf_documents inv
+		WHERE rma.doc_type = 'rma'
+		  AND rma.match_status = 'pending'
+		  AND inv.doc_type IN ('invoice', 'credit', 'credit_memo')
+		  AND inv.match_status = 'matched'
+		  AND inv.vendor_id = rma.vendor_id
+		  AND inv.location_name = rma.location_name
+		  AND rma.doc_date >= inv.doc_date
+		  AND rma.doc_date <= inv.doc_date + INTERVAL '14 days'`, now)
+	if err != nil {
+		log.Printf("[Cascade] RMA tier3 error: %v", err)
+		errors = append(errors, err.Error())
+	} else {
+		n, _ := result.RowsAffected()
+		rmaLinked += int(n)
+		log.Printf("[Cascade] RMA tier3 (date proximity): %d", n)
+	}
+	log.Printf("[Cascade] RMAs linked total: %d", rmaLinked)
+
+	// ── C. Credit linking ───────────────────────────────────────
+
+	// C1: Credit invoice_number matches a matched RMA or invoice
+	result, err = db.Exec(`
+		UPDATE wf_documents cred
+		SET match_status = 'matched',
+		    matched_credit_id = COALESCE(rma.id, inv.id),
+		    matched_transaction_id = COALESCE(rma.matched_transaction_id, inv.matched_transaction_id),
+		    match_confidence = 88,
+		    updated_at = $1
+		FROM wf_documents inv
+		LEFT JOIN wf_documents rma ON (
+			rma.doc_type = 'rma' AND rma.match_status = 'matched'
+			AND rma.vendor_id = inv.vendor_id AND rma.invoice_number = inv.invoice_number
+		)
+		WHERE cred.doc_type IN ('credit', 'credit_memo')
+		  AND cred.match_status = 'pending'
+		  AND cred.invoice_number IS NOT NULL AND cred.invoice_number != ''
+		  AND inv.doc_type IN ('invoice', 'credit', 'credit_memo', 'rma')
+		  AND inv.match_status = 'matched'
+		  AND inv.vendor_id = cred.vendor_id
+		  AND inv.invoice_number = cred.invoice_number
+		  AND inv.id != cred.id`, now)
+	if err != nil {
+		log.Printf("[Cascade] credit C1 error: %v", err)
+		errors = append(errors, err.Error())
+	} else {
+		n, _ := result.RowsAffected()
+		creditLinked += int(n)
+		log.Printf("[Cascade] Credit C1 (invoice_number match): %d", n)
+	}
+
+	// C2: Credit matches a statement line_item directly (amount within 5%, same vendor+location)
+	result, err = db.Exec(`
+		UPDATE wf_documents cred
+		SET match_status = 'matched',
+		    matched_statement_id = stmt.id,
+		    matched_transaction_id = stmt.matched_transaction_id,
+		    match_confidence = 75,
+		    updated_at = $1
+		FROM wf_documents stmt
+		WHERE cred.doc_type IN ('credit', 'credit_memo')
+		  AND cred.match_status = 'pending'
+		  AND stmt.doc_type = 'statement'
+		  AND stmt.match_status = 'matched'
+		  AND stmt.vendor_id = cred.vendor_id
+		  AND cred.doc_date >= stmt.doc_date - INTERVAL '7 days'
+		  AND cred.doc_date <= stmt.doc_date + INTERVAL '7 days'
+		  AND EXISTS (
+			SELECT 1 FROM jsonb_array_elements(stmt.line_items) li
+			WHERE (li->>'amount')::numeric < 0
+			  AND ABS(ABS((li->>'amount')::numeric) - ABS(cred.amount)) /
+			      GREATEST(ABS(cred.amount), 0.01) <= 0.05
+		  )`, now)
+	if err != nil {
+		log.Printf("[Cascade] credit C2 error: %v", err)
+		errors = append(errors, err.Error())
+	} else {
+		n, _ := result.RowsAffected()
+		creditLinked += int(n)
+		log.Printf("[Cascade] Credit C2 (statement line_item match): %d", n)
+	}
+	log.Printf("[Cascade] Credits linked total: %d", creditLinked)
+
+	return
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MISSING PAGES REVIEW & MANUAL MATCH
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) MissingPagesReview(c *gin.Context) {
+	db := h.sqlDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database unavailable"})
+		return
+	}
+
+	groups := h.groupStatementPages(db)
+
+	type reviewItem struct {
+		VendorName     string  `json:"vendor_name"`
+		LocationName   string  `json:"location_name"`
+		CustomerNumber string  `json:"customer_number"`
+		StatementDate  string  `json:"statement_date"`
+		ComputedTotal  float64 `json:"computed_total"`
+		DocumentTotal  float64 `json:"document_total"`
+		Difference     float64 `json:"difference"`
+		PageCount      int     `json:"page_count"`
+		PageIDs        []string `json:"page_ids"`
+	}
+
+	var items []reviewItem
+	for _, g := range groups {
+		if g.Completeness != "missing_pages" {
+			continue
+		}
+		dateStr := ""
+		if !g.DocDate.IsZero() {
+			dateStr = g.DocDate.Format("2006-01-02")
+		}
+		var ids []string
+		for _, p := range g.Pages {
+			ids = append(ids, p.ID)
+		}
+		items = append(items, reviewItem{
+			VendorName:     g.VendorName,
+			LocationName:   g.LocationName,
+			CustomerNumber: g.CustomerNumber,
+			StatementDate:  dateStr,
+			ComputedTotal:  g.ComputedTotal,
+			DocumentTotal:  g.DocumentTotal,
+			Difference:     math.Abs(g.ComputedTotal - g.DocumentTotal),
+			PageCount:      len(g.Pages),
+			PageIDs:        ids,
+		})
+	}
+
+	// Sort by difference descending
+	for i := 0; i < len(items); i++ {
+		for j := i + 1; j < len(items); j++ {
+			if items[j].Difference > items[i].Difference {
+				items[i], items[j] = items[j], items[i]
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"total":   len(items),
+		"groups":  items,
+	})
+}
+
+func (h *MatchingEngineHandler) ForceMatchStatement(c *gin.Context) {
+	db := h.sqlDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database unavailable"})
+		return
+	}
+
+	docID := c.Param("group_id")
+	var req struct {
+		TransactionID string `json:"transaction_id"`
+		Notes         string `json:"notes"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.TransactionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": "transaction_id is required"})
+		return
+	}
+
+	// Verify the document exists
+	var vendorID sql.NullString
+	err := db.QueryRow(`SELECT vendor_id FROM wf_documents WHERE id = $1`, docID).Scan(&vendorID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "document not found"})
+		return
+	}
+
+	// Verify the transaction exists
+	var txID string
+	err = db.QueryRow(`SELECT id FROM plaid_transactions WHERE id = $1`, req.TransactionID).Scan(&txID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "transaction not found"})
+		return
+	}
+
+	now := time.Now()
+
+	// Insert match_results
+	_, err = db.Exec(`
+		INSERT INTO match_results (id, document_id, transaction_id,
+			score_amount, score_date, score_vendor, score_invoice, score_location,
+			total_score, passed_threshold, date_rule_violated, match_type, matched_at)
+		VALUES (gen_random_uuid(), $1, $2, 0, 0, 0, 0, 0, 100, true, false, 'manual', $3)`,
+		docID, req.TransactionID, now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+
+	// Mark the document as matched
+	db.Exec(`UPDATE wf_documents SET match_status = 'matched', matched_transaction_id = $1,
+		match_confidence = 100, updated_at = $2 WHERE id = $3`,
+		req.TransactionID, now, docID)
+
+	// Mark the transaction as matched
+	db.Exec(`UPDATE plaid_transactions SET match_status = 'matched', matched_document_id = $1,
+		match_confidence = 100 WHERE id = $2`,
+		docID, req.TransactionID)
+
+	// Mark all sibling pages (same vendor + location + date) as matched
+	db.Exec(`UPDATE wf_documents SET match_status = 'matched',
+		matched_transaction_id = $1, matched_statement_id = $2,
+		match_confidence = 100, updated_at = $3
+		WHERE id != $2 AND doc_type = 'statement' AND match_status = 'pending'
+		  AND vendor_id = $4
+		  AND location_name = (SELECT location_name FROM wf_documents WHERE id = $2)
+		  AND doc_date = (SELECT doc_date FROM wf_documents WHERE id = $2)`,
+		req.TransactionID, docID, now, vendorID.String)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":         "matched",
+		"document_id":    docID,
+		"transaction_id": req.TransactionID,
+		"notes":          req.Notes,
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════
 // DIRECT VENDOR MATCHING (batched)
 // ═══════════════════════════════════════════════════════════════
 
@@ -705,25 +1608,49 @@ func (h *MatchingEngineHandler) loadDirectDocBatch(db *sql.DB, limit, offset int
 	return docs, rows.Err()
 }
 
-func (h *MatchingEngineHandler) loadTxnsForDirectDoc(db *sql.DB, doc wfDoc, vendorNorm string) []plaidTx {
+func (h *MatchingEngineHandler) loadTxnsForDirectDoc(db *sql.DB, doc wfDoc, vendorNorm string, aliases map[string][]vendorAlias) []plaidTx {
 	if !doc.DocDate.Valid {
 		return nil
 	}
-	from := doc.DocDate.Time.AddDate(0, 0, -3).Format("2006-01-02")
-	to := doc.DocDate.Time.AddDate(0, 0, 7).Format("2006-01-02")
+	from := doc.DocDate.Time.AddDate(0, 0, -15).Format("2006-01-02")
+	to := doc.DocDate.Time.AddDate(0, 0, 15).Format("2006-01-02")
 	docAmt := 0.0
 	if doc.Amount.Valid {
 		docAmt = math.Abs(doc.Amount.Float64)
 	}
-	rows, err := db.Query(`
+
+	// Build vendor name patterns: primary name + aliases
+	var patterns []string
+	patterns = append(patterns, vendorNorm)
+	if doc.VendorID.Valid {
+		for _, a := range aliases[doc.VendorID.String] {
+			patterns = append(patterns, a.Alias)
+		}
+	}
+
+	var args []interface{}
+	args = append(args, from, to)
+	var likeConds []string
+	for _, pat := range patterns {
+		args = append(args, "%"+pat+"%")
+		likeConds = append(likeConds, fmt.Sprintf("normalized_merchant LIKE $%d", len(args)))
+	}
+	vendorCond := "(" + strings.Join(likeConds, " OR ") + ")"
+
+	args = append(args, docAmt)
+	amtIdx := len(args)
+
+	query := fmt.Sprintf(`
 		SELECT id, location_name, transaction_date, amount,
 		       description, merchant_name, normalized_merchant
 		FROM plaid_transactions
 		WHERE match_status = 'pending'
-		  AND normalized_merchant LIKE $1
-		  AND transaction_date BETWEEN $2 AND $3
-		ORDER BY ABS(amount - $4)
-		LIMIT 20`, "%"+vendorNorm+"%", from, to, docAmt)
+		  AND %s
+		  AND transaction_date BETWEEN $1 AND $2
+		ORDER BY ABS(amount - $%d)
+		LIMIT 20`, vendorCond, amtIdx)
+
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		log.Printf("[MatchEngine] loadTxnsForDirectDoc error: %v", err)
 		return nil
@@ -1055,4 +1982,198 @@ func (h *MatchingEngineHandler) recordMatch(db *sql.DB, doc wfDoc, tx plaidTx, s
 		return fmt.Errorf("update plaid_transactions: %w", err)
 	}
 	return nil
+}
+
+// ═══════════════════════════════════════════════════════════════
+// STATEMENT COMPLETENESS DIAGNOSTIC
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) StatementCompleteness(c *gin.Context) {
+	db := h.sqlDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database unavailable"})
+		return
+	}
+
+	// Ensure tables exist
+	db.Exec(`CREATE TABLE IF NOT EXISTS vendor_location_accounts (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		vendor_id UUID NOT NULL REFERENCES vendors(id),
+		customer_number VARCHAR(50) NOT NULL,
+		location_name VARCHAR(100) NOT NULL,
+		notes VARCHAR(255),
+		created_at TIMESTAMP DEFAULT NOW(),
+		UNIQUE(vendor_id, customer_number)
+	)`)
+
+	groups := h.groupStatementPages(db)
+
+	totalGroups := len(groups)
+	complete := 0
+	missing := 0
+	noTotal := 0
+
+	type vendorStats struct {
+		Total        int `json:"total"`
+		Complete     int `json:"complete"`
+		MissingPages int `json:"missing_pages"`
+		NoTotalFound int `json:"no_total_found"`
+	}
+	byVendor := map[string]*vendorStats{}
+
+	type missingDetail struct {
+		VendorName     string  `json:"vendor_name"`
+		CustomerNumber string  `json:"customer_number"`
+		LocationName   string  `json:"location_name"`
+		StatementDate  string  `json:"statement_date"`
+		ComputedTotal  float64 `json:"computed_total"`
+		DocumentTotal  float64 `json:"document_total"`
+		PageCount      int     `json:"page_count"`
+	}
+	var missingDetails []missingDetail
+
+	for _, g := range groups {
+		vn := g.VendorName
+		if vn == "" {
+			vn = "unknown"
+		}
+		vs, ok := byVendor[vn]
+		if !ok {
+			vs = &vendorStats{}
+			byVendor[vn] = vs
+		}
+		vs.Total++
+
+		switch g.Completeness {
+		case "complete":
+			complete++
+			vs.Complete++
+		case "missing_pages":
+			missing++
+			vs.MissingPages++
+			dateStr := ""
+			if !g.DocDate.IsZero() {
+				dateStr = g.DocDate.Format("2006-01-02")
+			}
+			missingDetails = append(missingDetails, missingDetail{
+				VendorName:     g.VendorName,
+				CustomerNumber: g.CustomerNumber,
+				LocationName:   g.LocationName,
+				StatementDate:  dateStr,
+				ComputedTotal:  g.ComputedTotal,
+				DocumentTotal:  g.DocumentTotal,
+				PageCount:      len(g.Pages),
+			})
+		case "no_total_found":
+			noTotal++
+			vs.NoTotalFound++
+		}
+	}
+
+	if missingDetails == nil {
+		missingDetails = []missingDetail{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"total_groups":         totalGroups,
+		"complete":             complete,
+		"missing_pages":        missing,
+		"no_total_found":       noTotal,
+		"by_vendor":            byVendor,
+		"missing_pages_detail": missingDetails,
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VENDOR LOCATION ACCOUNTS
+// ═══════════════════════════════════════════════════════════════
+
+func (h *MatchingEngineHandler) CreateVendorLocationAccount(c *gin.Context) {
+	db := h.sqlDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database unavailable"})
+		return
+	}
+
+	var req struct {
+		VendorName     string `json:"vendor_name"`
+		CustomerNumber string `json:"customer_number"`
+		LocationName   string `json:"location_name"`
+		Notes          string `json:"notes"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
+		return
+	}
+
+	var vendorID string
+	err := db.QueryRow(`SELECT id FROM vendors WHERE normalized_name = LOWER(TRIM($1))`, req.VendorName).Scan(&vendorID)
+	if err != nil {
+		err = db.QueryRow(`SELECT id FROM vendors WHERE LOWER(normalized_name) LIKE LOWER($1) LIMIT 1`,
+			"%"+strings.TrimSpace(req.VendorName)+"%").Scan(&vendorID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"detail": fmt.Sprintf("vendor '%s' not found", req.VendorName)})
+			return
+		}
+	}
+
+	_, err = db.Exec(`INSERT INTO vendor_location_accounts (id, vendor_id, customer_number, location_name, notes)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4)
+		ON CONFLICT (vendor_id, customer_number) DO UPDATE SET
+			location_name = EXCLUDED.location_name, notes = EXCLUDED.notes`,
+		vendorID, req.CustomerNumber, req.LocationName, req.Notes)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":          "created",
+		"vendor_id":       vendorID,
+		"customer_number": req.CustomerNumber,
+		"location_name":   req.LocationName,
+	})
+}
+
+func (h *MatchingEngineHandler) ListVendorLocationAccounts(c *gin.Context) {
+	db := h.sqlDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "database unavailable"})
+		return
+	}
+
+	rows, err := db.Query(`
+		SELECT vla.id, v.normalized_name, vla.customer_number,
+		       vla.location_name, COALESCE(vla.notes, ''), vla.created_at
+		FROM vendor_location_accounts vla
+		JOIN vendors v ON v.id = vla.vendor_id
+		ORDER BY v.normalized_name, vla.customer_number`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type account struct {
+		ID             string `json:"id"`
+		VendorName     string `json:"vendor_name"`
+		CustomerNumber string `json:"customer_number"`
+		LocationName   string `json:"location_name"`
+		Notes          string `json:"notes"`
+		CreatedAt      string `json:"created_at"`
+	}
+
+	byVendor := map[string][]account{}
+	for rows.Next() {
+		var a account
+		var createdAt time.Time
+		if err := rows.Scan(&a.ID, &a.VendorName, &a.CustomerNumber,
+			&a.LocationName, &a.Notes, &createdAt); err != nil {
+			continue
+		}
+		a.CreatedAt = createdAt.Format(time.RFC3339)
+		byVendor[a.VendorName] = append(byVendor[a.VendorName], a)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"accounts": byVendor})
 }
