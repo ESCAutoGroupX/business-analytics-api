@@ -265,7 +265,7 @@ func (h *DocumentMatchHandler) UnmatchedBucket(c *gin.Context) {
 			FROM transactions
 			WHERE ABS(COALESCE(amount, 0) + COALESCE($1, 0)) < (ABS(COALESCE($1, 0)) * 0.10 + 0.01)
 			  AND CASE WHEN $2 = '' THEN true
-			       ELSE date BETWEEN ($2::date - interval '14 days')::text AND ($2::date + interval '14 days')::text
+			       ELSE date BETWEEN ($2::date - interval '14 days')::date AND ($2::date + interval '14 days')::date
 			  END
 			  AND document_match_status IS DISTINCT FROM 'unmatched_explicit'
 			  AND matched_document_id IS NULL
