@@ -876,12 +876,12 @@ func (h *DocumentHandler) Summary(c *gin.Context) {
 		return
 	}
 
-	var total, pending, matched, unmatched, thisMonth int
+	var total, pending, matched, failed, thisMonth int
 
 	_ = db.QueryRow(`SELECT COUNT(*) FROM documents WHERE is_deleted = false`).Scan(&total)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM documents WHERE is_deleted = false AND status = 'pending'`).Scan(&pending)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM documents WHERE is_deleted = false AND status = 'matched'`).Scan(&matched)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM documents WHERE is_deleted = false AND status != 'matched'`).Scan(&unmatched)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM documents WHERE is_deleted = false AND status IN ('matched', 'auto_matched')`).Scan(&matched)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM documents WHERE is_deleted = false AND status IN ('failed', 'needs_review')`).Scan(&failed)
 
 	now := time.Now()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
@@ -891,7 +891,7 @@ func (h *DocumentHandler) Summary(c *gin.Context) {
 		"total":      total,
 		"pending":    pending,
 		"matched":    matched,
-		"unmatched":  unmatched,
+		"failed":     failed,
 		"this_month": thisMonth,
 	})
 }
