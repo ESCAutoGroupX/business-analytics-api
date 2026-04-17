@@ -1033,3 +1033,19 @@ type VendorPartMapping struct {
 }
 
 func (VendorPartMapping) TableName() string { return "vendor_part_mappings" }
+
+// ──────────────────────────────────────────────
+// User Dashboard Layouts
+// ──────────────────────────────────────────────
+
+type UserDashboardLayout struct {
+	ID        int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID    string    `gorm:"column:user_id;not null;uniqueIndex:idx_user_page" json:"user_id"`
+	Page      string    `gorm:"column:page;not null;uniqueIndex:idx_user_page" json:"page"`
+	Layout    JSONB     `gorm:"column:layout;type:jsonb;not null" json:"layout"`
+	IsLocked  bool      `gorm:"column:is_locked;default:false" json:"is_locked"`
+	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+}
+
+func (UserDashboardLayout) TableName() string { return "user_dashboard_layouts" }

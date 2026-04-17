@@ -83,6 +83,7 @@ func ConnectGORM(databaseURL string) (*gorm.DB, error) {
 		&models.VendorCreditApplication{},
 		&models.PartMatchResult{},
 		&models.VendorPartMapping{},
+		&models.UserDashboardLayout{},
 	} {
 		if err := db.AutoMigrate(model); err != nil {
 			log.Printf("WARN: AutoMigrate %T: %v", model, err)

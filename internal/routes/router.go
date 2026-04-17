@@ -48,6 +48,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	receivablesHandler.AutoMigrate()
 	docMatchHandler := &handlers.DocumentMatchHandler{GormDB: gormDB}
 	docMatchHandler.AutoMigrate()
+	dashboardLayoutHandler := &handlers.DashboardLayoutHandler{GormDB: gormDB}
 	notificationHandler := &handlers.NotificationHandler{
 		Email: &notifications.EmailSender{GormDB: gormDB, Cfg: cfg},
 	}
@@ -421,6 +422,14 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			settings.GET("/integrations", documentHandler.GetIntegrationSettings)
 			settings.PUT("/integrations", documentHandler.SaveIntegrationSettings)
 			settings.POST("/integrations/test-wickedfile", documentHandler.TestWickedFileConnection)
+		}
+
+		// Dashboard Layouts (per-user, per-page)
+		layouts := protected.Group("/dashboard-layouts")
+		{
+			layouts.GET("/:page", dashboardLayoutHandler.Get)
+			layouts.PUT("/:page", dashboardLayoutHandler.Put)
+			layouts.DELETE("/:page", dashboardLayoutHandler.Delete)
 		}
 
 		// Locations
