@@ -41,14 +41,17 @@ func (h *PlaidHandler) TakeDailyBalanceSnapshot() {
 // today's snapshot, and returns the collected live balances.
 func (h *PlaidHandler) saveLiveBalances(today string) []liveAccount {
 	var items []models.PlaidItem
-	h.GormDB.Find(&items)
+	h.GormDB.Where("needs_reauth = FALSE OR needs_reauth IS NULL").Find(&items)
 
 	var live []liveAccount
-	for _, item := range items {
+	for i, item := range items {
 		result, err := h.plaidRequest("/accounts/balance/get", map[string]interface{}{
 			"access_token": item.AccessToken,
 		})
 		if err != nil {
+			if isReauthError(err) {
+				h.markItemNeedsReauth(&items[i], err.Error())
+			}
 			log.Printf("Balance snapshot: Plaid error for item %s: %v", item.ItemID, err)
 			continue
 		}
