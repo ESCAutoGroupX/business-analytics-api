@@ -86,7 +86,11 @@ func (h *BulkImportHandler) AutoMigrate() {
 		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS wf_id VARCHAR`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_wf_id ON documents(wf_id)`,
 		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS wf_scan_id TEXT`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_wf_scan_id ON documents(wf_scan_id) WHERE wf_scan_id IS NOT NULL`,
+		// Replace any pre-existing partial unique index with a plain unique
+		// index — ON CONFLICT (wf_scan_id) requires a full-table unique
+		// constraint, and the partial predicate makes it unusable.
+		`DROP INDEX IF EXISTS idx_documents_wf_scan_id`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_wf_scan_id ON documents(wf_scan_id)`,
 		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS notes TEXT`,
 		`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ocr_vendor_name VARCHAR`,
 		`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ocr_vendor_source VARCHAR`,
@@ -587,15 +591,17 @@ func (h *BulkImportHandler) ImportFromWF(c *gin.Context) {
 	agent := "wf-import-v1"
 
 	var (
-		docs         []models.Document
-		missingFile  int
-		total        int
-		shortScan    int
+		docs        []models.Document
+		missingFile int
+		total       int
+		shortScan   int
+		batchErrs   int
 	)
 	const batchSize = 500
 
-	flush := func() (inserted int) {
-		if len(docs) == 0 {
+	flush := func() (inserted, errored int) {
+		attempted := len(docs)
+		if attempted == 0 {
 			return
 		}
 		res := h.GormDB.Clauses(clause.OnConflict{
@@ -603,9 +609,12 @@ func (h *BulkImportHandler) ImportFromWF(c *gin.Context) {
 			DoNothing: true,
 		}).Create(&docs)
 		if res.Error != nil {
-			log.Printf("[ImportFromWF] batch insert error (%d rows): %v", len(docs), res.Error)
+			log.Printf("[ImportFromWF] batch insert error (%d rows): %v", attempted, res.Error)
+			errored = attempted
+		} else {
+			inserted = int(res.RowsAffected)
 		}
-		inserted = int(res.RowsAffected)
+		log.Printf("[ImportFromWF] batch flushed: attempted=%d inserted=%d", attempted, inserted)
 		docs = docs[:0]
 		return
 	}
@@ -690,21 +699,23 @@ func (h *BulkImportHandler) ImportFromWF(c *gin.Context) {
 
 		docs = append(docs, doc)
 		if len(docs) >= batchSize {
-			inserted := flush()
+			inserted, errored := flush()
 			imported += inserted
-			skippedExisting += batchSize - inserted
+			batchErrs += errored
+			skippedExisting += batchSize - inserted - errored
 		}
 	}
 	if len(docs) > 0 {
 		remaining := len(docs)
-		inserted := flush()
+		inserted, errored := flush()
 		imported += inserted
-		skippedExisting += remaining - inserted
+		batchErrs += errored
+		skippedExisting += remaining - inserted - errored
 	}
 
 	elapsed := time.Since(start)
-	log.Printf("[ImportFromWF] done: total=%d imported=%d skipped_existing=%d missing_file=%d short_scan=%d in %s",
-		total, imported, skippedExisting, missingFile, shortScan, elapsed)
+	log.Printf("[ImportFromWF] done: total=%d imported=%d skipped_existing=%d missing_file=%d short_scan=%d errors=%d in %s",
+		total, imported, skippedExisting, missingFile, shortScan, batchErrs, elapsed)
 
 	resp := gin.H{
 		"status":           "complete",
@@ -713,6 +724,7 @@ func (h *BulkImportHandler) ImportFromWF(c *gin.Context) {
 		"skipped_existing": skippedExisting,
 		"missing_file":     missingFile,
 		"short_scan_id":    shortScan,
+		"errors":           batchErrs,
 		"elapsed_ms":       elapsed.Milliseconds(),
 	}
 	c.JSON(http.StatusOK, resp)
