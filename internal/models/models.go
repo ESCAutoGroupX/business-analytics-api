@@ -855,6 +855,8 @@ type Document struct {
 	WickedFileSent       bool       `gorm:"column:wickedfile_sent;default:false" json:"wickedfile_sent"`
 	WickedFileSentAt     *time.Time `gorm:"column:wickedfile_sent_at" json:"wickedfile_sent_at"`
 	WfID                 *string    `gorm:"column:wf_id" json:"wf_id"`
+	WfScanID             *string    `gorm:"column:wf_scan_id" json:"wf_scan_id"`
+	Notes                *string    `gorm:"column:notes" json:"notes"`
 	CreatedAt            time.Time  `gorm:"column:created_at;autoCreateTime" json:"created_at"`
 	UpdatedAt            time.Time  `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }

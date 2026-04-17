@@ -378,6 +378,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			docs.GET("/bulk-import-status", bulkImportHandler.BulkImportStatus)
 			docs.POST("/bulk-ocr", bulkImportHandler.BulkOCR)
 			docs.GET("/bulk-ocr-status", bulkImportHandler.BulkOCRStatus)
+			docs.POST("/import-from-wf", bulkImportHandler.ImportFromWF)
 			docs.GET("/vendor-corrections", documentHandler.ListVendorCorrections)
 			docs.GET("/:id", documentHandler.Get)
 			docs.PATCH("/:id", documentHandler.Update)

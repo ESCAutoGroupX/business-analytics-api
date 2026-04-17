@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/config"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/models"
@@ -84,6 +85,9 @@ func (h *BulkImportHandler) AutoMigrate() {
 	stmts := []string{
 		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS wf_id VARCHAR`,
 		`CREATE INDEX IF NOT EXISTS idx_documents_wf_id ON documents(wf_id)`,
+		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS wf_scan_id TEXT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_wf_scan_id ON documents(wf_scan_id) WHERE wf_scan_id IS NOT NULL`,
+		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS notes TEXT`,
 		`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ocr_vendor_name VARCHAR`,
 		`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ocr_vendor_source VARCHAR`,
 	}
@@ -467,4 +471,254 @@ func (h *BulkImportHandler) ocrOne(apiKey string, doc models.Document) gin.H {
 
 	h.GormDB.Model(&models.Document{}).Where("id = ?", doc.ID).Updates(updates)
 	return gin.H{"document_id": doc.ID, "confidence": confidence}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Import from wf_documents (DB-driven, one-shot)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// buildWFPathMap walks wfPDFRoot once and builds a map of
+//
+//	location_name + ":" + last-6-hex-of-filename  →  full disk path
+//
+// The wf_documents.wf_scan_id is a 24-char hex string; only its last 6
+// chars appear in the filename on disk, so we key by that suffix.
+func buildWFPathMap() (map[string]string, error) {
+	m := make(map[string]string, 12000)
+	err := filepath.WalkDir(wfPDFRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".pdf") {
+			return nil
+		}
+		base := strings.TrimSuffix(name, filepath.Ext(name))
+		parts := strings.Split(base, "_")
+		if len(parts) == 0 {
+			return nil
+		}
+		suffix := strings.ToLower(parts[len(parts)-1])
+		if len(suffix) != 6 {
+			return nil
+		}
+		loc := filepath.Base(filepath.Dir(p))
+		m[loc+":"+suffix] = p
+		return nil
+	})
+	return m, err
+}
+
+// locationCodeFor returns the canonical ALP/CED/… code for a WickedFile
+// folder name. Unknown folders fall back to ESC.
+func locationCodeFor(folder string) string {
+	if code, ok := wfLocationMap[folder]; ok {
+		return code
+	}
+	return "ESC"
+}
+
+// matchStatusToDocStatus maps wf_documents.match_status to the documents
+// table's status enum.
+func matchStatusToDocStatus(ms string) string {
+	switch ms {
+	case "matched":
+		return "matched"
+	case "ignored":
+		return "unmatched_explicit"
+	default:
+		return "pending"
+	}
+}
+
+// ImportFromWF handles POST /documents/import-from-wf — joins wf_documents
+// against the vendors table, resolves each row's real disk path via the
+// filesystem map, and batch-inserts into documents with
+// ON CONFLICT (wf_scan_id) DO NOTHING.
+func (h *BulkImportHandler) ImportFromWF(c *gin.Context) {
+	if !atomic.CompareAndSwapInt32(&wfImportRunning, 0, 1) {
+		c.JSON(http.StatusConflict, gin.H{"detail": "bulk import already running"})
+		return
+	}
+	defer atomic.StoreInt32(&wfImportRunning, 0)
+
+	start := time.Now()
+
+	pathMap, err := buildWFPathMap()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "scan: " + err.Error()})
+		return
+	}
+
+	db, _ := h.GormDB.DB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "no db"})
+		return
+	}
+
+	rows, err := db.Query(`
+		SELECT
+			wf.wf_scan_id,
+			wf.location_name,
+			wf.doc_type,
+			v.name,
+			wf.doc_date,
+			wf.amount,
+			wf.invoice_number,
+			wf.po_number,
+			wf.line_items::text,
+			wf.match_status,
+			wf.matched_transaction_id::text,
+			wf.customer_number,
+			wf.wf_created_at
+		FROM wf_documents wf
+		LEFT JOIN vendors v ON v.id::text = wf.vendor_id::text
+	`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "query wf_documents: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	isFinancial := true
+	agent := "wf-import-v1"
+
+	var (
+		docs         []models.Document
+		missingFile  int
+		total        int
+		shortScan    int
+	)
+	const batchSize = 500
+
+	flush := func() (inserted int) {
+		if len(docs) == 0 {
+			return
+		}
+		res := h.GormDB.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "wf_scan_id"}},
+			DoNothing: true,
+		}).Create(&docs)
+		if res.Error != nil {
+			log.Printf("[ImportFromWF] batch insert error (%d rows): %v", len(docs), res.Error)
+		}
+		inserted = int(res.RowsAffected)
+		docs = docs[:0]
+		return
+	}
+
+	var imported, skippedExisting int
+	for rows.Next() {
+		total++
+		var (
+			scanID, locName, docType                  string
+			vendorName, invNum, poNum, liJSON         *string
+			matchStatus, matchedTxnID, custNum        *string
+			docDate                                   *time.Time
+			amount                                    *float64
+			wfCreated                                 *time.Time
+		)
+		if err := rows.Scan(
+			&scanID, &locName, &docType, &vendorName, &docDate, &amount,
+			&invNum, &poNum, &liJSON, &matchStatus, &matchedTxnID,
+			&custNum, &wfCreated,
+		); err != nil {
+			log.Printf("[ImportFromWF] row scan error: %v", err)
+			continue
+		}
+
+		if len(scanID) < 6 {
+			shortScan++
+			continue
+		}
+		suffix := strings.ToLower(scanID[len(scanID)-6:])
+		path, ok := pathMap[locName+":"+suffix]
+		if !ok {
+			missingFile++
+			continue
+		}
+		filename := filepath.Base(path)
+
+		docTypeUpper := strings.ToUpper(docType)
+		status := "pending"
+		if matchStatus != nil {
+			status = matchStatusToDocStatus(*matchStatus)
+		}
+
+		var docDateStr *string
+		if docDate != nil {
+			s := docDate.Format("2006-01-02")
+			docDateStr = &s
+		}
+
+		noteCN := ""
+		if custNum != nil {
+			noteCN = *custNum
+		}
+		noteVal := "customer_number: " + noteCN
+
+		locCode := locationCodeFor(locName)
+		scanIDCopy := scanID
+		locCopy := locName
+
+		doc := models.Document{
+			Filename:             filename,
+			FilePath:             path,
+			DocumentType:         &docTypeUpper,
+			VendorName:           vendorName,
+			DocumentDate:         docDateStr,
+			TotalAmount:          amount,
+			VendorInvoiceNumber:  invNum,
+			PONumber:             poNum,
+			LineItems:            liJSON,
+			Location:             &locCopy,
+			LocationCode:         &locCode,
+			Status:               status,
+			MatchedTransactionID: matchedTxnID,
+			Notes:                &noteVal,
+			IsDeleted:            false,
+			IsFinancial:          &isFinancial,
+			OCRAgentVersion:      &agent,
+			WfScanID:             &scanIDCopy,
+		}
+		if wfCreated != nil {
+			doc.CreatedAt = *wfCreated
+		}
+
+		docs = append(docs, doc)
+		if len(docs) >= batchSize {
+			inserted := flush()
+			imported += inserted
+			skippedExisting += batchSize - inserted
+		}
+	}
+	if len(docs) > 0 {
+		remaining := len(docs)
+		inserted := flush()
+		imported += inserted
+		skippedExisting += remaining - inserted
+	}
+
+	elapsed := time.Since(start)
+	log.Printf("[ImportFromWF] done: total=%d imported=%d skipped_existing=%d missing_file=%d short_scan=%d in %s",
+		total, imported, skippedExisting, missingFile, shortScan, elapsed)
+
+	resp := gin.H{
+		"status":           "complete",
+		"total":            total,
+		"imported":         imported,
+		"skipped_existing": skippedExisting,
+		"missing_file":     missingFile,
+		"short_scan_id":    shortScan,
+		"elapsed_ms":       elapsed.Milliseconds(),
+	}
+	c.JSON(http.StatusOK, resp)
+
+	// Kick off matching asynchronously so the response returns quickly.
+	if h.Matcher != nil && imported > 0 {
+		go h.Matcher.MatchDocumentsToTransactions()
+	}
 }
