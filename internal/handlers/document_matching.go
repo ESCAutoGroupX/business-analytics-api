@@ -138,9 +138,9 @@ func (h *DocumentMatchHandler) MatchAll(c *gin.Context) {
 
 	var docs []models.Document
 	h.GormDB.Where("(is_financial IS NULL OR is_financial = true)").
-		Where("matched_transaction_id IS NULL").
+		Where("is_deleted = false").
 		Where("status IN ('pending', 'unmatched', 'auto_matched', 'needs_review')").
-		Where("total_amount IS NOT NULL AND total_amount > 0").
+		Where("matched_transaction_id IS NULL").
 		Find(&docs)
 
 	total := int32(len(docs))
@@ -183,9 +183,9 @@ func (h *DocumentMatchHandler) MatchDocumentsToTransactions() {
 
 	var docs []models.Document
 	h.GormDB.Where("(is_financial IS NULL OR is_financial = true)").
-		Where("matched_transaction_id IS NULL").
+		Where("is_deleted = false").
 		Where("status IN ('pending', 'unmatched', 'auto_matched', 'needs_review')").
-		Where("total_amount IS NOT NULL AND total_amount > 0").
+		Where("matched_transaction_id IS NULL").
 		Find(&docs)
 
 	matched := 0
