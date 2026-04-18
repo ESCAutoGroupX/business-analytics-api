@@ -40,7 +40,7 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	paybillHandler := &handlers.PayBillHandler{GormDB: gormDB}
 	tekmetricHandler := &handlers.TekmetricHandler{GormDB: gormDB, Cfg: cfg}
 	dashboardHandler := &handlers.DashboardHandler{GormDB: gormDB, Cfg: cfg}
-	wfProxyHandler := handlers.NewWickedFileProxyHandler(gormDB)
+	wfProxyHandler := handlers.NewWickedFileProxyHandler(gormDB, cfg)
 	documentHandler := &handlers.DocumentHandler{GormDB: gormDB, Cfg: cfg, WFProxy: wfProxyHandler}
 	apHandler := &handlers.APHandler{GormDB: gormDB}
 	apHandler.AutoMigrate()
@@ -440,11 +440,19 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			settings.GET("/wickedfile-cookies/status", wfProxyHandler.CookieStatus)
 		}
 
-		// WickedFile proxy
+		// WickedFile proxy + session auth
 		wf := protected.Group("/wf")
 		{
 			wf.GET("/document/:scanPageId/pdf", wfProxyHandler.ProxyPDF)
 			wf.GET("/document/:scanPageId/metadata", wfProxyHandler.ProxyMetadata)
+
+			wf.POST("/auth/login", wfProxyHandler.Login)
+			wf.POST("/auth/verify-2fa", wfProxyHandler.Verify2FA)
+			wf.GET("/auth/status", wfProxyHandler.AuthStatus)
+			wf.PUT("/auth/credentials", wfProxyHandler.SaveCredentials)
+
+			wf.POST("/documents/sync-metadata", wfProxyHandler.StartMetadataSync)
+			wf.GET("/documents/sync-status", wfProxyHandler.MetadataSyncStatus)
 		}
 
 		// Dashboard Layouts (per-user, per-page)
