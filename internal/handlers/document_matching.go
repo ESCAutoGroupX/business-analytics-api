@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"math"
@@ -26,6 +27,9 @@ var (
 )
 
 // AutoMigrate adds document match columns to transactions table.
+// Each ALTER is run on a dedicated connection with a 5s lock_timeout so a
+// zombie backend session can't hang startup — a lock conflict downgrades to
+// a warn and the loop moves on.
 func (h *DocumentMatchHandler) AutoMigrate() {
 	db := h.sqlDB()
 	if db == nil {
@@ -42,8 +46,19 @@ func (h *DocumentMatchHandler) AutoMigrate() {
 		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS wf_category VARCHAR`,
 		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS matched_transaction_ids JSONB`,
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		log.Printf("[DocumentMatchHandler] migration conn: %v", err)
+		return
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `SET lock_timeout = '5s'`); err != nil {
+		log.Printf("[DocumentMatchHandler] set lock_timeout: %v", err)
+	}
 	for _, m := range migrations {
-		if _, err := db.Exec(m); err != nil {
+		if _, err := conn.ExecContext(ctx, m); err != nil {
 			log.Printf("[DocumentMatchHandler] migration warning: %v", err)
 		}
 	}
