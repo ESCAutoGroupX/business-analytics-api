@@ -173,6 +173,11 @@ func SyncScanPages(
 		}
 		if batchWatermark.After(result.HighWaterMark) {
 			result.HighWaterMark = batchWatermark
+		}
+		// Only persist watermark / record counters on real runs. A dry-run
+		// that advanced the watermark would silently skip those same records
+		// on the next real run.
+		if !opts.DryRun {
 			if err := state.PersistWatermark(ctx, "scanPage", result.HighWaterMark, len(batch)); err != nil {
 				return err
 			}
