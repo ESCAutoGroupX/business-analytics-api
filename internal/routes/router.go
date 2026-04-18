@@ -40,7 +40,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 	paybillHandler := &handlers.PayBillHandler{GormDB: gormDB}
 	tekmetricHandler := &handlers.TekmetricHandler{GormDB: gormDB, Cfg: cfg}
 	dashboardHandler := &handlers.DashboardHandler{GormDB: gormDB, Cfg: cfg}
-	documentHandler := &handlers.DocumentHandler{GormDB: gormDB, Cfg: cfg}
+	wfProxyHandler := handlers.NewWickedFileProxyHandler(gormDB)
+	documentHandler := &handlers.DocumentHandler{GormDB: gormDB, Cfg: cfg, WFProxy: wfProxyHandler}
 	apHandler := &handlers.APHandler{GormDB: gormDB}
 	apHandler.AutoMigrate()
 	matchingHandler := &handlers.MatchingHandler{GormDB: gormDB, Cfg: cfg}
@@ -435,6 +436,15 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			settings.GET("/integrations", documentHandler.GetIntegrationSettings)
 			settings.PUT("/integrations", documentHandler.SaveIntegrationSettings)
 			settings.POST("/integrations/test-wickedfile", documentHandler.TestWickedFileConnection)
+			settings.PUT("/wickedfile-cookies", wfProxyHandler.SaveCookies)
+			settings.GET("/wickedfile-cookies/status", wfProxyHandler.CookieStatus)
+		}
+
+		// WickedFile proxy
+		wf := protected.Group("/wf")
+		{
+			wf.GET("/document/:scanPageId/pdf", wfProxyHandler.ProxyPDF)
+			wf.GET("/document/:scanPageId/metadata", wfProxyHandler.ProxyMetadata)
 		}
 
 		// Dashboard Layouts (per-user, per-page)

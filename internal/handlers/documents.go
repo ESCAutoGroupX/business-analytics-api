@@ -29,8 +29,9 @@ import (
 )
 
 type DocumentHandler struct {
-	GormDB *gorm.DB
-	Cfg    *config.Config
+	GormDB  *gorm.DB
+	Cfg     *config.Config
+	WFProxy *WickedFileProxyHandler
 }
 
 func (h *DocumentHandler) sqlDB() *sql.DB {
@@ -859,7 +860,19 @@ func (h *DocumentHandler) ServeFile(c *gin.Context) {
 		return
 	}
 
-	if _, err := os.Stat(doc.FilePath); os.IsNotExist(err) {
+	localMissing := doc.FilePath == ""
+	if !localMissing {
+		if _, err := os.Stat(doc.FilePath); os.IsNotExist(err) {
+			localMissing = true
+		}
+	}
+
+	if localMissing && doc.WfScanID != nil && *doc.WfScanID != "" && h.WFProxy != nil {
+		_ = h.WFProxy.StreamPDF(c, *doc.WfScanID)
+		return
+	}
+
+	if localMissing {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "file not found on disk"})
 		return
 	}

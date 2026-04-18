@@ -32,6 +32,10 @@ func (h *DocumentHandler) ServePDF(c *gin.Context) {
 
 	path := FindPDFPath(h.Cfg.PDFDir, loc, scanID.String)
 	if path == "" {
+		if h.WFProxy != nil {
+			_ = h.WFProxy.StreamPDF(c, scanID.String)
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"detail": "pdf file not found on disk"})
 		return
 	}
