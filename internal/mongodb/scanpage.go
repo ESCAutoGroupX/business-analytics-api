@@ -78,9 +78,13 @@ func NewScanPageCursor(ctx context.Context, db *mongo.Database, watermark time.T
 	if !watermark.IsZero() {
 		filter["updatedAt"] = bson.M{"$gt": watermark}
 	}
+	// AllowDiskUse is required — updatedAt isn't indexed on scanPage, so
+	// Mongo would otherwise hit its 100 MB in-memory sort limit on the
+	// first run. Disk spill is cheap for a single one-shot pass.
 	opts := options.Find().
 		SetSort(bson.D{{Key: "updatedAt", Value: 1}}).
-		SetBatchSize(batchSize)
+		SetBatchSize(batchSize).
+		SetAllowDiskUse(true)
 	cur, err := db.Collection("scanPage").Find(ctx, filter, opts)
 	if err != nil {
 		return nil, err
