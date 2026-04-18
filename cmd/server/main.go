@@ -11,6 +11,7 @@ import (
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/database"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/middleware"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/routes"
+	"github.com/ESCAutoGroupX/business-analytics-api/internal/sync"
 )
 
 func main() {
@@ -20,6 +21,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+
+	sync.AutoMigrate(gormDB)
 
 	r := gin.Default()
 
