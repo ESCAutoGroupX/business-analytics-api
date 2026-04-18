@@ -240,10 +240,15 @@ func SyncScanPages(
 	return result, nil
 }
 
-// recordErr appends to FirstErrors with a hard cap of 20.
+// recordErr appends to FirstErrors with a hard cap of 20. Also logs the
+// first 3 errors immediately — silent drop bugs (e.g. a bson field shape
+// mismatch dropping 14% of records) should never happen unnoticed.
 func recordErr(r *SyncResult, err error) {
 	if len(r.FirstErrors) >= 20 {
 		return
+	}
+	if len(r.FirstErrors) < 3 {
+		log.Printf("WF sync error sample #%d: %v", len(r.FirstErrors)+1, err)
 	}
 	r.FirstErrors = append(r.FirstErrors, err.Error())
 }
