@@ -32,12 +32,17 @@ func WickedFileDB() (*mongo.Database, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
+		// AllowTruncatingDoubles lets the BSON decoder narrow a float64 into
+		// an int struct field (truncating the fractional part). WickedFile
+		// stores partMatch.score as float64 in some documents; without this
+		// flag the decoder drops the whole record rather than round off.
 		opts := options.Client().
 			ApplyURI(uri).
 			SetMaxPoolSize(20).
 			SetMinPoolSize(2).
 			SetServerSelectionTimeout(5 * time.Second).
-			SetConnectTimeout(5 * time.Second)
+			SetConnectTimeout(5 * time.Second).
+			SetBSONOptions(&options.BSONOptions{AllowTruncatingDoubles: true})
 
 		c, err := mongo.Connect(ctx, opts)
 		if err != nil {
