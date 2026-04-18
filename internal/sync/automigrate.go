@@ -94,6 +94,26 @@ func AutoMigrate(db *gorm.DB) {
 		}
 	}
 
+	// Widen NUMERIC columns on wf_part_audits and wf_part_match_results —
+	// real WickedFile data has quantities and amounts that overflow the
+	// Step-2 precisions (one overflow at ~1,100 rows into the first sync).
+	// ALTER COLUMN TYPE to a wider NUMERIC is lock-light when no data loss
+	// is possible; idempotent because Postgres no-ops when the type already
+	// matches.
+	for _, s := range []string{
+		`ALTER TABLE wf_part_audits        ALTER COLUMN quantity    TYPE NUMERIC(16,3)`,
+		`ALTER TABLE wf_part_audits        ALTER COLUMN unit_price  TYPE NUMERIC(18,4)`,
+		`ALTER TABLE wf_part_audits        ALTER COLUMN amount      TYPE NUMERIC(18,2)`,
+		`ALTER TABLE wf_part_match_results ALTER COLUMN invoice_quantity TYPE NUMERIC(16,3)`,
+		`ALTER TABLE wf_part_match_results ALTER COLUMN match_quantity   TYPE NUMERIC(16,3)`,
+		`ALTER TABLE wf_part_match_results ALTER COLUMN invoice_amount   TYPE NUMERIC(18,2)`,
+		`ALTER TABLE wf_part_match_results ALTER COLUMN match_amount     TYPE NUMERIC(18,2)`,
+	} {
+		if _, err := sqlConn.ExecContext(ctx, s); err != nil {
+			log.Printf("WF sync AutoMigrate: %v\n  SQL: %.120s", err, s)
+		}
+	}
+
 	// wf_match_results needs composite uniqueness — one audit record explodes
 	// into multiple result rows, so a single-column unique on wf_audit_id
 	// would reject every second row. Only safe to change the uniqueness while
