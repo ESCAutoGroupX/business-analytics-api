@@ -79,11 +79,14 @@ func AutoMigrate(db *gorm.DB) {
 		    AND wf_scan_id ~ '^[a-f0-9]{24}$'`,
 
 		// UNIQUE index is required for INSERT ... ON CONFLICT (wf_scan_page_id).
-		// Created AFTER the backfill so we never try to uniquify a column full
-		// of NULLs with a duplicate ObjectId.
+		// Postgres treats NULLs as distinct in unique indexes, so a full
+		// (non-partial) unique index allows many NULL wf_scan_page_id rows
+		// AND satisfies the ON CONFLICT (wf_scan_page_id) inference rule,
+		// which a partial predicate-qualified index does not.
+		// Drop any prior partial variant before creating the full one.
+		`DROP INDEX IF EXISTS uq_documents_wf_scan_page_id`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_wf_scan_page_id
-		   ON documents(wf_scan_page_id)
-		   WHERE wf_scan_page_id IS NOT NULL`,
+		   ON documents(wf_scan_page_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := sqlConn.ExecContext(ctx, s); err != nil {
