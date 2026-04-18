@@ -41,70 +41,24 @@ type MongoAdminHandler struct {
 	RunStatementAudit  SyncRunner
 	RunPartAudit       SyncRunner
 	RunPartMatch       SyncRunner
+	Scheduler          *syncpkg.Scheduler
 
 	runMu   sync.Mutex
 	running map[string]bool
 }
 
-// NewMongoAdminHandler wires the production counter + scanPage sync runner.
+// NewMongoAdminHandler wires the production counter + sync runners for
+// every collection using the shared runner constructors in sync package.
 func NewMongoAdminHandler(db *gorm.DB) *MongoAdminHandler {
-	h := &MongoAdminHandler{
-		Count:   defaultMongoCount,
-		GormDB:  db,
-		running: map[string]bool{},
+	return &MongoAdminHandler{
+		Count:             defaultMongoCount,
+		GormDB:            db,
+		RunScanPage:       SyncRunner(syncpkg.NewScanPageRunner(db)),
+		RunStatementAudit: SyncRunner(syncpkg.NewStatementAuditRunner(db)),
+		RunPartAudit:      SyncRunner(syncpkg.NewPartAuditRunner(db)),
+		RunPartMatch:      SyncRunner(syncpkg.NewPartMatchRunner(db)),
+		running:           map[string]bool{},
 	}
-	h.RunScanPage = func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
-		factory := func(ctx context.Context, wm time.Time, batch int) (mongodb.ScanPageSource, error) {
-			mdb, err := mongodb.WickedFileDB()
-			if err != nil {
-				return nil, err
-			}
-			return mongodb.NewScanPageCursor(ctx, mdb, wm, int32(batch))
-		}
-		writer := &syncpkg.PostgresDocumentWriter{DB: db}
-		state := &syncpkg.GormStateStore{DB: db}
-		return syncpkg.SyncScanPages(ctx, state, factory, writer, opts)
-	}
-	h.RunStatementAudit = func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
-		factory := func(ctx context.Context, wm time.Time, batch int) (mongodb.StatementAuditSource, error) {
-			mdb, err := mongodb.WickedFileDB()
-			if err != nil {
-				return nil, err
-			}
-			return mongodb.NewStatementAuditCursor(ctx, mdb, wm, int32(batch))
-		}
-		resolver := syncpkg.NewPostgresFKResolver(db)
-		writer := &syncpkg.PostgresMatchResultWriter{DB: db}
-		state := &syncpkg.GormStateStore{DB: db}
-		return syncpkg.SyncStatementAudits(ctx, state, factory, resolver, writer, opts)
-	}
-	h.RunPartAudit = func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
-		factory := func(ctx context.Context, wm time.Time, batch int) (mongodb.PartAuditSource, error) {
-			mdb, err := mongodb.WickedFileDB()
-			if err != nil {
-				return nil, err
-			}
-			return mongodb.NewPartAuditCursor(ctx, mdb, wm, int32(batch))
-		}
-		resolver := &syncpkg.PostgresPartAuditFKResolver{DB: db}
-		writer := &syncpkg.PostgresPartAuditWriter{DB: db}
-		state := &syncpkg.GormStateStore{DB: db}
-		return syncpkg.SyncPartAudits(ctx, state, factory, resolver, writer, opts)
-	}
-	h.RunPartMatch = func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
-		factory := func(ctx context.Context, wm time.Time, batch int) (mongodb.PartMatchSource, error) {
-			mdb, err := mongodb.WickedFileDB()
-			if err != nil {
-				return nil, err
-			}
-			return mongodb.NewPartMatchCursor(ctx, mdb, wm, int32(batch))
-		}
-		resolver := &syncpkg.PostgresPartMatchFKResolver{DB: db}
-		writer := &syncpkg.PostgresPartMatchWriter{DB: db}
-		state := &syncpkg.GormStateStore{DB: db}
-		return syncpkg.SyncPartMatches(ctx, state, factory, resolver, writer, opts)
-	}
-	return h
 }
 
 func defaultMongoCount(ctx context.Context, name string) (int64, error) {
@@ -233,6 +187,53 @@ func (h *MongoAdminHandler) startSync(c *gin.Context, collection string, run Syn
 		"limit":      opts.Limit,
 		"run_id":     runID,
 	})
+}
+
+// GET /admin/mongo/sync/schedule — scheduler state + next/last run.
+func (h *MongoAdminHandler) SyncScheduleStatus(c *gin.Context) {
+	resp := gin.H{
+		"enabled":   false,
+		"cron_spec": syncpkg.CronSpec,
+	}
+	if h.Scheduler == nil {
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+	resp["enabled"] = true
+	resp["jobs"] = h.Scheduler.Jobs()
+	resp["running"] = h.Scheduler.Running()
+	if next := h.Scheduler.NextRun(); !next.IsZero() {
+		resp["next_run"] = next.UTC().Format(time.RFC3339)
+	} else {
+		resp["next_run"] = nil
+	}
+	if last := h.Scheduler.LastRun(); !last.IsZero() {
+		resp["last_run"] = last.UTC().Format(time.RFC3339)
+	} else {
+		resp["last_run"] = nil
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// POST /admin/mongo/sync/schedule/trigger — run SyncAll now.
+func (h *MongoAdminHandler) TriggerSchedule(c *gin.Context) {
+	if h.Scheduler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "scheduler disabled"})
+		return
+	}
+	if h.Scheduler.Running() {
+		c.JSON(http.StatusConflict, gin.H{"error": "SyncAll already running"})
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Scheduler: manual-trigger panic: %v", r)
+			}
+		}()
+		h.Scheduler.SyncAll(context.Background())
+	}()
+	c.JSON(http.StatusAccepted, gin.H{"triggered": true})
 }
 
 // GET /admin/mongo/sync/status — returns all 4 rows of mongo_sync_state.

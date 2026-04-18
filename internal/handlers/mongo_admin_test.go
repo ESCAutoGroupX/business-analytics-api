@@ -320,6 +320,134 @@ func TestSyncPartMatch_DryRunDefault(t *testing.T) {
 	wg.Wait()
 }
 
+// ── SyncScheduleStatus + TriggerSchedule handler tests ─────────
+
+func TestSyncScheduleStatus_RequiresAuth(t *testing.T) {
+	h := &handlers.MongoAdminHandler{}
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.GET("/admin/mongo/sync/schedule", h.SyncScheduleStatus)
+	})
+	req := testutil.UnauthenticatedRequest(t, "GET", "/admin/mongo/sync/schedule", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSyncScheduleStatus_ReturnsShape_Disabled(t *testing.T) {
+	h := &handlers.MongoAdminHandler{} // Scheduler is nil → disabled
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.GET("/admin/mongo/sync/schedule", h.SyncScheduleStatus)
+	})
+	req := testutil.AuthedRequest(t, "GET", "/admin/mongo/sync/schedule", nil, "user-1")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Enabled  bool   `json:"enabled"`
+		CronSpec string `json:"cron_spec"`
+	}
+	testutil.DecodeJSON(t, w.Body, &payload)
+	if payload.Enabled {
+		t.Errorf("enabled = true, want false when Scheduler is nil")
+	}
+	if payload.CronSpec != syncpkg.CronSpec {
+		t.Errorf("cron_spec = %q, want %q", payload.CronSpec, syncpkg.CronSpec)
+	}
+}
+
+func TestSyncScheduleStatus_ReturnsShape_Enabled(t *testing.T) {
+	s := syncpkg.NewScheduler()
+	s.RegisterJob("scanPage", func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) { return &syncpkg.SyncResult{}, nil })
+	s.RegisterJob("partAudit", func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) { return &syncpkg.SyncResult{}, nil })
+	if err := s.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	h := &handlers.MongoAdminHandler{Scheduler: s}
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.GET("/admin/mongo/sync/schedule", h.SyncScheduleStatus)
+	})
+	req := testutil.AuthedRequest(t, "GET", "/admin/mongo/sync/schedule", nil, "user-1")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var payload struct {
+		Enabled  bool     `json:"enabled"`
+		CronSpec string   `json:"cron_spec"`
+		Jobs     []string `json:"jobs"`
+		NextRun  *string  `json:"next_run"`
+	}
+	testutil.DecodeJSON(t, w.Body, &payload)
+	if !payload.Enabled {
+		t.Errorf("enabled = false")
+	}
+	if len(payload.Jobs) != 2 {
+		t.Errorf("jobs = %v, want 2 entries", payload.Jobs)
+	}
+	if payload.NextRun == nil || *payload.NextRun == "" {
+		t.Errorf("next_run should be populated when scheduler is running")
+	}
+}
+
+func TestSyncScheduleTrigger_RequiresAuth(t *testing.T) {
+	h := &handlers.MongoAdminHandler{}
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.POST("/admin/mongo/sync/schedule/trigger", h.TriggerSchedule)
+	})
+	req := testutil.UnauthenticatedRequest(t, "POST", "/admin/mongo/sync/schedule/trigger", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSyncScheduleTrigger_ReturnsAccepted(t *testing.T) {
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	s := syncpkg.NewScheduler()
+	s.RegisterJob("gated", func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
+		defer wg.Done()
+		<-release
+		return &syncpkg.SyncResult{}, nil
+	})
+
+	h := &handlers.MongoAdminHandler{Scheduler: s}
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.POST("/admin/mongo/sync/schedule/trigger", h.TriggerSchedule)
+	})
+	req := testutil.AuthedRequest(t, "POST", "/admin/mongo/sync/schedule/trigger", nil, "user-1")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	close(release)
+	wg.Wait()
+}
+
+func TestSyncScheduleTrigger_DisabledReturnsServiceUnavailable(t *testing.T) {
+	h := &handlers.MongoAdminHandler{}
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.POST("/admin/mongo/sync/schedule/trigger", h.TriggerSchedule)
+	})
+	req := testutil.AuthedRequest(t, "POST", "/admin/mongo/sync/schedule/trigger", nil, "user-1")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 503 {
+		t.Fatalf("expected 503 when scheduler nil, got %d", w.Code)
+	}
+}
+
 func TestSyncScanPage_ReturnsConflictWhenRunning(t *testing.T) {
 	release := make(chan struct{})
 	var wg sync.WaitGroup

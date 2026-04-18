@@ -1,6 +1,9 @@
 package routes
 
 import (
+	"log"
+	"os"
+
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
@@ -8,6 +11,7 @@ import (
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/handlers"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/middleware"
 	"github.com/ESCAutoGroupX/business-analytics-api/internal/notifications"
+	syncpkg "github.com/ESCAutoGroupX/business-analytics-api/internal/sync"
 )
 
 func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Config) {
@@ -310,6 +314,24 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 		custNumExtractor := &handlers.CustomerNumberExtractor{GormDB: gormDB, Cfg: cfg}
 		visionExtractor := &handlers.VisionExtractor{GormDB: gormDB, Cfg: cfg}
 		mongoAdminHandler := handlers.NewMongoAdminHandler(gormDB)
+		// Hourly scheduler is env-gated so Bob can disable without a rebuild.
+		// When enabled, wire all four WickedFile sync runners in FK-order and
+		// start the cron immediately.
+		if os.Getenv("SYNC_SCHEDULE_ENABLED") == "true" {
+			sched := syncpkg.NewScheduler()
+			sched.RegisterJob("scanPage", syncpkg.NewScanPageRunner(gormDB))
+			sched.RegisterJob("statementAudit", syncpkg.NewStatementAuditRunner(gormDB))
+			sched.RegisterJob("partAudit", syncpkg.NewPartAuditRunner(gormDB))
+			sched.RegisterJob("partMatch", syncpkg.NewPartMatchRunner(gormDB))
+			if err := sched.Start(); err != nil {
+				log.Printf("Scheduler: start failed: %v", err)
+			} else {
+				log.Printf("Scheduler: enabled, running at :15 each hour")
+				mongoAdminHandler.Scheduler = sched
+			}
+		} else {
+			log.Printf("Scheduler: disabled (set SYNC_SCHEDULE_ENABLED=true to enable)")
+		}
 		admin := protected.Group("/admin")
 		{
 			admin.GET("/mongo/status", mongoAdminHandler.MongoStatus)
@@ -318,6 +340,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			admin.POST("/mongo/sync/partaudit", mongoAdminHandler.StartPartAuditSync)
 			admin.POST("/mongo/sync/partmatch", mongoAdminHandler.StartPartMatchSync)
 			admin.GET("/mongo/sync/status", mongoAdminHandler.SyncStatus)
+			admin.GET("/mongo/sync/schedule", mongoAdminHandler.SyncScheduleStatus)
+			admin.POST("/mongo/sync/schedule/trigger", mongoAdminHandler.TriggerSchedule)
 			admin.POST("/migrate-plaid-transactions", transactionHandler.MigratePlaidTransactions)
 			admin.POST("/run-matching", matchingEngineHandler.RunMatching)
 			admin.GET("/match-stats", matchingEngineHandler.MatchStats)
