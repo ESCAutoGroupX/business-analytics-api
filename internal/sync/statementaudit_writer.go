@@ -71,7 +71,7 @@ func (r *PostgresFKResolver) Resolve(ctx context.Context, rows []MatchResultRow)
 		}
 		var docs []docRow
 		if err := r.DB.WithContext(ctx).Raw(
-			`SELECT id, wf_scan_page_id FROM documents WHERE wf_scan_page_id = ANY(?)`, ids,
+			`SELECT id, wf_scan_page_id FROM documents WHERE wf_scan_page_id IN (?)`, ids,
 		).Scan(&docs).Error; err != nil {
 			return nil, fmt.Errorf("documents lookup: %w", err)
 		}
@@ -98,7 +98,7 @@ func (r *PostgresFKResolver) Resolve(ctx context.Context, rows []MatchResultRow)
 			var txns []txnRow
 			if err := r.DB.WithContext(ctx).Raw(
 				`SELECT id, plaid_id FROM transactions
-				  WHERE id = ANY(?) OR plaid_id = ANY(?)`, ids, ids,
+				  WHERE id IN (?) OR plaid_id IN (?)`, ids, ids,
 			).Scan(&txns).Error; err != nil {
 				return nil, fmt.Errorf("transactions lookup: %w", err)
 			}
