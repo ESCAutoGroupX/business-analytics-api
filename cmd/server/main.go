@@ -25,6 +25,10 @@ func main() {
 	sync.AutoMigrate(gormDB)
 
 	r := gin.Default()
+	// 301 redirects on trailing-slash mismatches break CORS for browser
+	// clients; letting Gin route both /foo and /foo/ to the same handler
+	// is simpler than chasing the redirect dance.
+	r.RedirectTrailingSlash = false
 
 	routes.Register(r, gormDB, cfg.SecretKey, cfg)
 
