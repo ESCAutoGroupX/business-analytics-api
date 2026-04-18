@@ -63,6 +63,9 @@ func TestMapScanPageToColumns_HappyPath(t *testing.T) {
 	if r.WfOCRAgentVersion != "wf-mongo-v1" {
 		t.Errorf("WfOCRAgentVersion = %q", r.WfOCRAgentVersion)
 	}
+	if r.OCRAgentVersion != "wf-import-v1" {
+		t.Errorf("OCRAgentVersion = %q, want %q (UI filters on this value)", r.OCRAgentVersion, "wf-import-v1")
+	}
 	if r.DocumentType == nil || *r.DocumentType != "invoice" {
 		t.Errorf("DocumentType = %v", r.DocumentType)
 	}

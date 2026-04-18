@@ -21,7 +21,18 @@ const (
 	lenAgentVersion  = 32
 	lenInvoiceNumber = 64
 	lenPoNumber      = 64
-	ocrAgentVersion  = "wf-mongo-v1"
+
+	// wfOCRAgentVersion is written to the NEW wf_ocr_agent_version column
+	// — it's a provenance marker that "this row came from the Mongo sync".
+	wfOCRAgentVersion = "wf-mongo-v1"
+
+	// legacyOCRAgentVersion is written to the LEGACY ocr_agent_version
+	// column. The Documents page and Transaction Registry both filter on
+	// ocr_agent_version='wf-import-v1', so synced rows have to match that
+	// string to appear in the UI alongside the manual-import cohort. The
+	// two columns are intentionally independent: wf_ocr_agent_version says
+	// how the row got here; ocr_agent_version is the UI-visible marker.
+	legacyOCRAgentVersion = "wf-import-v1"
 )
 
 // DocumentRow is the minimal shape we write into Postgres. Keys match
@@ -31,7 +42,8 @@ type DocumentRow struct {
 	WfScanID          string     // legacy column; dual-set so ServeFile fallback finds WF proxy
 	WfLocationID      *string    // varchar(36)
 	WfS3Key           *string    // varchar(255)
-	WfOCRAgentVersion string     // 'wf-mongo-v1'
+	WfOCRAgentVersion string     // 'wf-mongo-v1' (provenance, new column)
+	OCRAgentVersion   string     // 'wf-import-v1' (UI filter, legacy column)
 	WfMLParsed        bool
 	WfMLReviewed      bool
 	WfSyncedAt        time.Time
@@ -58,7 +70,8 @@ func MapScanPage(p *mongodb.ScanPage) DocumentRow {
 	row := DocumentRow{
 		WfScanPageID:      truncate("wf_scan_page_id", p.ID.Hex(), lenScanPageID),
 		WfScanID:          p.ID.Hex(),
-		WfOCRAgentVersion: ocrAgentVersion,
+		WfOCRAgentVersion: wfOCRAgentVersion,
+		OCRAgentVersion:   legacyOCRAgentVersion,
 		WfMLParsed:        p.Search.MLParsed,
 		WfSyncedAt:        now,
 		Timestamp:         now,

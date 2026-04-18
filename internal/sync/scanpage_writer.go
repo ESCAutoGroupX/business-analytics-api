@@ -26,7 +26,7 @@ func (w *PostgresDocumentWriter) UpsertBatch(ctx context.Context, rows []Documen
 		return 0, 0, nil
 	}
 
-	const colCount = 22
+	const colCount = 23
 	args := make([]interface{}, 0, len(rows)*colCount)
 	placeholders := make([]string, 0, len(rows))
 
@@ -40,27 +40,28 @@ func (w *PostgresDocumentWriter) UpsertBatch(ctx context.Context, rows []Documen
 
 		args = append(args,
 			r.Filename,            // filename
-			r.FilePath,            // file_path
-			r.DocumentType,        // document_type
-			r.VendorName,          // vendor_name
-			r.TotalAmount,         // total_amount
-			r.DocumentDate,        // document_date
-			r.WfScanID,            // wf_scan_id  (dual-set for ServeFile fallback)
-			r.WfScanPageID,        // wf_scan_page_id
-			r.WfLocationID,        // wf_location_id
-			r.WfS3Key,             // wf_s3_key
-			r.WfOCRAgentVersion,   // wf_ocr_agent_version
-			r.WfMLParsed,          // wf_ml_parsed
-			r.WfMLReviewed,        // wf_ml_reviewed
-			r.WfSyncedAt,          // wf_synced_at
-			r.WfInvoiceNumber,     // wf_invoice_number
-			r.WfPoNumber,          // wf_po_number
-			r.WfSubtotal,          // wf_subtotal
-			r.WfTax,               // wf_tax
-			r.WfLineItemCount,     // wf_line_item_count
-			r.WfOCRConfidence,     // wf_ocr_confidence
-			r.Timestamp,           // created_at
-			r.Timestamp,           // updated_at
+			r.FilePath,             // file_path
+			r.DocumentType,         // document_type
+			r.VendorName,           // vendor_name
+			r.TotalAmount,          // total_amount
+			r.DocumentDate,         // document_date
+			r.WfScanID,             // wf_scan_id  (dual-set for ServeFile fallback)
+			r.WfScanPageID,         // wf_scan_page_id
+			r.WfLocationID,         // wf_location_id
+			r.WfS3Key,              // wf_s3_key
+			r.WfOCRAgentVersion,    // wf_ocr_agent_version
+			r.OCRAgentVersion,      // ocr_agent_version (legacy; UI filter)
+			r.WfMLParsed,           // wf_ml_parsed
+			r.WfMLReviewed,         // wf_ml_reviewed
+			r.WfSyncedAt,           // wf_synced_at
+			r.WfInvoiceNumber,      // wf_invoice_number
+			r.WfPoNumber,           // wf_po_number
+			r.WfSubtotal,           // wf_subtotal
+			r.WfTax,                // wf_tax
+			r.WfLineItemCount,      // wf_line_item_count
+			r.WfOCRConfidence,      // wf_ocr_confidence
+			r.Timestamp,            // created_at
+			r.Timestamp,            // updated_at
 		)
 	}
 
@@ -69,7 +70,7 @@ INSERT INTO documents (
     filename, file_path,
     document_type, vendor_name, total_amount, document_date,
     wf_scan_id, wf_scan_page_id, wf_location_id, wf_s3_key,
-    wf_ocr_agent_version, wf_ml_parsed, wf_ml_reviewed, wf_synced_at,
+    wf_ocr_agent_version, ocr_agent_version, wf_ml_parsed, wf_ml_reviewed, wf_synced_at,
     wf_invoice_number, wf_po_number, wf_subtotal, wf_tax, wf_line_item_count, wf_ocr_confidence,
     created_at, updated_at
 ) VALUES ` + strings.Join(placeholders, ",") + `
@@ -82,6 +83,7 @@ ON CONFLICT (wf_scan_page_id) DO UPDATE SET
     wf_location_id       = EXCLUDED.wf_location_id,
     wf_s3_key            = EXCLUDED.wf_s3_key,
     wf_ocr_agent_version = EXCLUDED.wf_ocr_agent_version,
+    ocr_agent_version    = EXCLUDED.ocr_agent_version,
     wf_ml_parsed         = EXCLUDED.wf_ml_parsed,
     wf_ml_reviewed       = EXCLUDED.wf_ml_reviewed,
     wf_synced_at         = EXCLUDED.wf_synced_at,
