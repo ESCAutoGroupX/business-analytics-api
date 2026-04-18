@@ -39,6 +39,8 @@ type MongoAdminHandler struct {
 	GormDB             *gorm.DB
 	RunScanPage        SyncRunner
 	RunStatementAudit  SyncRunner
+	RunPartAudit       SyncRunner
+	RunPartMatch       SyncRunner
 
 	runMu   sync.Mutex
 	running map[string]bool
@@ -75,6 +77,32 @@ func NewMongoAdminHandler(db *gorm.DB) *MongoAdminHandler {
 		writer := &syncpkg.PostgresMatchResultWriter{DB: db}
 		state := &syncpkg.GormStateStore{DB: db}
 		return syncpkg.SyncStatementAudits(ctx, state, factory, resolver, writer, opts)
+	}
+	h.RunPartAudit = func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
+		factory := func(ctx context.Context, wm time.Time, batch int) (mongodb.PartAuditSource, error) {
+			mdb, err := mongodb.WickedFileDB()
+			if err != nil {
+				return nil, err
+			}
+			return mongodb.NewPartAuditCursor(ctx, mdb, wm, int32(batch))
+		}
+		resolver := &syncpkg.PostgresPartAuditFKResolver{DB: db}
+		writer := &syncpkg.PostgresPartAuditWriter{DB: db}
+		state := &syncpkg.GormStateStore{DB: db}
+		return syncpkg.SyncPartAudits(ctx, state, factory, resolver, writer, opts)
+	}
+	h.RunPartMatch = func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
+		factory := func(ctx context.Context, wm time.Time, batch int) (mongodb.PartMatchSource, error) {
+			mdb, err := mongodb.WickedFileDB()
+			if err != nil {
+				return nil, err
+			}
+			return mongodb.NewPartMatchCursor(ctx, mdb, wm, int32(batch))
+		}
+		resolver := &syncpkg.PostgresPartMatchFKResolver{DB: db}
+		writer := &syncpkg.PostgresPartMatchWriter{DB: db}
+		state := &syncpkg.GormStateStore{DB: db}
+		return syncpkg.SyncPartMatches(ctx, state, factory, resolver, writer, opts)
 	}
 	return h
 }
@@ -136,6 +164,16 @@ func (h *MongoAdminHandler) StartScanPageSync(c *gin.Context) {
 // POST /admin/mongo/sync/statementaudit?dry_run=&limit=&batch_size=
 func (h *MongoAdminHandler) StartStatementAuditSync(c *gin.Context) {
 	h.startSync(c, "statementAudit", h.RunStatementAudit)
+}
+
+// POST /admin/mongo/sync/partaudit?dry_run=&limit=&batch_size=
+func (h *MongoAdminHandler) StartPartAuditSync(c *gin.Context) {
+	h.startSync(c, "partAudit", h.RunPartAudit)
+}
+
+// POST /admin/mongo/sync/partmatch?dry_run=&limit=&batch_size=
+func (h *MongoAdminHandler) StartPartMatchSync(c *gin.Context) {
+	h.startSync(c, "partMatch", h.RunPartMatch)
 }
 
 // startSync is the shared kickoff. Rejects concurrent runs for the same

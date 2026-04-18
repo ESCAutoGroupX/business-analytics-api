@@ -226,6 +226,100 @@ func TestSyncStatementAudit_ReturnsConflictWhenRunning(t *testing.T) {
 	wg.Wait()
 }
 
+// ── StartPartAuditSync handler tests ────────────────────────────
+
+func paHandler(run handlers.SyncRunner) *handlers.MongoAdminHandler {
+	return &handlers.MongoAdminHandler{RunPartAudit: run}
+}
+
+func TestSyncPartAudit_RequiresAuth(t *testing.T) {
+	h := paHandler(func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
+		t.Fatalf("run should not be called without auth")
+		return nil, nil
+	})
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.POST("/admin/mongo/sync/partaudit", h.StartPartAuditSync)
+	})
+	req := testutil.UnauthenticatedRequest(t, "POST", "/admin/mongo/sync/partaudit", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSyncPartAudit_DryRunDefault(t *testing.T) {
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	h := paHandler(func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
+		defer wg.Done()
+		if !opts.DryRun {
+			t.Errorf("opts.DryRun = false, want true by default")
+		}
+		<-release
+		return &syncpkg.SyncResult{DryRun: true}, nil
+	})
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.POST("/admin/mongo/sync/partaudit", h.StartPartAuditSync)
+	})
+	req := testutil.AuthedRequest(t, "POST", "/admin/mongo/sync/partaudit", nil, "user-1")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	close(release)
+	wg.Wait()
+}
+
+// ── StartPartMatchSync handler tests ────────────────────────────
+
+func pmHandler(run handlers.SyncRunner) *handlers.MongoAdminHandler {
+	return &handlers.MongoAdminHandler{RunPartMatch: run}
+}
+
+func TestSyncPartMatch_RequiresAuth(t *testing.T) {
+	h := pmHandler(func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
+		t.Fatalf("run should not be called without auth")
+		return nil, nil
+	})
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.POST("/admin/mongo/sync/partmatch", h.StartPartMatchSync)
+	})
+	req := testutil.UnauthenticatedRequest(t, "POST", "/admin/mongo/sync/partmatch", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestSyncPartMatch_DryRunDefault(t *testing.T) {
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	h := pmHandler(func(ctx context.Context, opts syncpkg.SyncOpts) (*syncpkg.SyncResult, error) {
+		defer wg.Done()
+		if !opts.DryRun {
+			t.Errorf("opts.DryRun = false, want true by default")
+		}
+		<-release
+		return &syncpkg.SyncResult{DryRun: true}, nil
+	})
+	router := testutil.NewRouter(func(protected *gin.RouterGroup) {
+		protected.POST("/admin/mongo/sync/partmatch", h.StartPartMatchSync)
+	})
+	req := testutil.AuthedRequest(t, "POST", "/admin/mongo/sync/partmatch", nil, "user-1")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	close(release)
+	wg.Wait()
+}
+
 func TestSyncScanPage_ReturnsConflictWhenRunning(t *testing.T) {
 	release := make(chan struct{})
 	var wg sync.WaitGroup

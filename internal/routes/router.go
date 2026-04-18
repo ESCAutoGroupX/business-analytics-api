@@ -315,6 +315,8 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			admin.GET("/mongo/status", mongoAdminHandler.MongoStatus)
 			admin.POST("/mongo/sync/scanpage", mongoAdminHandler.StartScanPageSync)
 			admin.POST("/mongo/sync/statementaudit", mongoAdminHandler.StartStatementAuditSync)
+			admin.POST("/mongo/sync/partaudit", mongoAdminHandler.StartPartAuditSync)
+			admin.POST("/mongo/sync/partmatch", mongoAdminHandler.StartPartMatchSync)
 			admin.GET("/mongo/sync/status", mongoAdminHandler.SyncStatus)
 			admin.POST("/migrate-plaid-transactions", transactionHandler.MigratePlaidTransactions)
 			admin.POST("/run-matching", matchingEngineHandler.RunMatching)
