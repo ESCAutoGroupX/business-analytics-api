@@ -93,4 +93,34 @@ func AutoMigrate(db *gorm.DB) {
 			log.Printf("WF sync AutoMigrate: %v\n  SQL: %.120s", err, s)
 		}
 	}
+
+	// wf_match_results needs composite uniqueness — one audit record explodes
+	// into multiple result rows, so a single-column unique on wf_audit_id
+	// would reject every second row. Only safe to change the uniqueness while
+	// the table is empty; gate on COUNT(*) = 0 and WARN out otherwise.
+	var existing int
+	if err := sqlConn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM wf_match_results`).Scan(&existing); err != nil {
+		log.Printf("WF sync AutoMigrate: cannot count wf_match_results: %v", err)
+		return
+	}
+	if _, err := sqlConn.ExecContext(ctx,
+		`ALTER TABLE wf_match_results ADD COLUMN IF NOT EXISTS match_index INTEGER NOT NULL DEFAULT 0`); err != nil {
+		log.Printf("WF sync AutoMigrate: add match_index: %v", err)
+	}
+	if existing > 0 {
+		log.Printf("WF sync AutoMigrate: wf_match_results has %d rows — refusing to change unique key", existing)
+		return
+	}
+	// Drop the old single-column unique constraint / index if either remains.
+	for _, s := range []string{
+		`ALTER TABLE wf_match_results DROP CONSTRAINT IF EXISTS wf_match_results_wf_audit_id_key`,
+		`DROP INDEX IF EXISTS wf_match_results_wf_audit_id_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS wf_match_results_audit_kind_idx
+		   ON wf_match_results (wf_audit_id, match_kind, match_index)`,
+	} {
+		if _, err := sqlConn.ExecContext(ctx, s); err != nil {
+			log.Printf("WF sync AutoMigrate: %v\n  SQL: %.120s", err, s)
+		}
+	}
 }
