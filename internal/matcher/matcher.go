@@ -2,6 +2,28 @@ package matcher
 
 import "time"
 
+// CandidateView is the compact per-candidate detail surfaced in the log.
+// Populated for up to the top-3 scored candidates of each transaction so
+// a reviewer can see the selected match AND the runners-up side-by-side.
+type CandidateView struct {
+	DocumentID           int64
+	Score                int
+	DocDate              time.Time
+	DocAmount            float64
+	DocType              string
+	DocVendor            string
+	DocInvoiceNum        string
+	DocScanPageID        string
+	AmountMode           string
+	AmountScoreComponent int
+	VendorScoreComponent int
+	DateScoreComponent   int
+	VendorSimilarityPct  float64
+	SurchargeFlag        bool
+	SurchargePct         *float64
+	ActualInvoiceAmount  *float64
+}
+
 // MatchProposal captures one candidate's scoring, classification, and the
 // context needed to write the human-review log entry. Preview mode
 // returns a slice of these; live mode will insert them into
@@ -35,6 +57,11 @@ type MatchProposal struct {
 	DocType       string
 	DocInvoiceNum string
 	DocScanPageID string
+
+	// TopN is the top-3 scored candidates (0th duplicates the selected match).
+	// Used by the log formatter to surface runners-up; empty on UNMATCHED
+	// transactions that had no qualifying candidates at all.
+	TopN []CandidateView
 }
 
 // RunStats aggregates a run's outcome for the status endpoint and the

@@ -94,6 +94,21 @@ func AutoMigrate(db *gorm.DB) {
 		}
 	}
 
+	// Partial cover index for the matcher's candidate-window query
+	// (see internal/matcher/runner.go). The SELECT filters on
+	// document_date BETWEEN ? AND ? with fixed predicates on document_type,
+	// is_deleted, and total_amount > 0; this index's WHERE clause mirrors
+	// those so it stays small (~160K rows vs 330K on the base table) and
+	// the leading document_date column gives a clean range scan.
+	if _, err := sqlConn.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_documents_matcher_candidates
+		   ON documents (document_date, document_type, is_deleted, total_amount)
+		   WHERE total_amount > 0
+		     AND document_type IN ('invoice','invoice-other','credit','credit-other','statement')`,
+	); err != nil {
+		log.Printf("WF sync AutoMigrate: %v\n  SQL: matcher candidates index", err)
+	}
+
 	// Widen NUMERIC columns on wf_part_audits and wf_part_match_results —
 	// real WickedFile data has quantities and amounts that overflow the
 	// Step-2 precisions (one overflow at ~1,100 rows into the first sync).

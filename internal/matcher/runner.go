@@ -159,9 +159,32 @@ func loadTransactions(ctx context.Context, db *gorm.DB, opts PreviewOpts) ([]txn
 		where = append(where, "date <= ?")
 		args = append(args, opts.DateTo.Format("2006-01-02"))
 	}
-	// Only signed-debit transactions are plausible AP-invoice payers (positive
-	// amount = debit in Plaid's convention). Keep all for now — scoreAmount
-	// uses abs() so credits (refunds) will also score against credit docs.
+
+	// Exclude account types (loan, etc.) entirely.
+	if len(ExcludedAccountTypes) > 0 {
+		ph := make([]string, len(ExcludedAccountTypes))
+		for i, t := range ExcludedAccountTypes {
+			ph[i] = "?"
+			args = append(args, t)
+		}
+		where = append(where, fmt.Sprintf(
+			"(LOWER(COALESCE(account_type,'')) NOT IN (%s))", strings.Join(ph, ",")))
+	}
+
+	// Sign convention (verified on prod): amount > 0 = money OUT. Deposits
+	// to depository/checking are money IN and can't be AP-invoice payers.
+	where = append(where, `NOT (amount < 0 AND LOWER(COALESCE(account_type,'')) IN ('depository','checking'))`)
+
+	// Operational cash-flow name patterns — see matcher.ExcludedNamePatterns.
+	if len(ExcludedNamePatterns) > 0 {
+		nots := make([]string, len(ExcludedNamePatterns))
+		for i, pat := range ExcludedNamePatterns {
+			nots[i] = "LOWER(COALESCE(name,'')) NOT LIKE ?"
+			args = append(args, pat)
+		}
+		where = append(where, "("+strings.Join(nots, " AND ")+")")
+	}
+
 	sql := `SELECT id, amount, date, name, merchant_name, vendor,
 	               account_type, account_subtype, account_name, document_match_status
 	          FROM transactions`
@@ -265,6 +288,36 @@ func scoreTransaction(
 		RunnerUpScore:    runnerUpScore,
 	})
 
+	// Build TopN: up to 3 candidates, each with its own score breakdown.
+	// 0th is always the selected match — duplication is intentional so the
+	// log formatter can iterate TopN uniformly without special-casing index 0.
+	limit := 3
+	if len(scored) < limit {
+		limit = len(scored)
+	}
+	topN := make([]CandidateView, limit)
+	for i := 0; i < limit; i++ {
+		s := scored[i]
+		topN[i] = CandidateView{
+			DocumentID:           s.doc.ID,
+			Score:                s.score,
+			DocDate:              s.docDate,
+			DocAmount:            derefFloat(s.doc.TotalAmount),
+			DocType:              derefStr(s.doc.DocumentType),
+			DocVendor:            derefStr(s.doc.VendorName),
+			DocInvoiceNum:        derefStr(s.doc.WfInvoiceNumber),
+			DocScanPageID:        derefStr(s.doc.WfScanPageID),
+			AmountMode:           s.amount.Mode,
+			AmountScoreComponent: s.amount.Score,
+			VendorScoreComponent: s.vendor.Score,
+			DateScoreComponent:   s.dateSc,
+			VendorSimilarityPct:  s.vendor.SimilarityPct,
+			SurchargeFlag:        s.amount.SurchargeFlag,
+			SurchargePct:         s.amount.SurchargePct,
+			ActualInvoiceAmount:  s.amount.ActualInvoiceAmount,
+		}
+	}
+
 	p := &MatchProposal{
 		TransactionID:        t.ID,
 		DocumentID:           top.doc.ID,
@@ -292,11 +345,15 @@ func scoreTransaction(
 		DocType:       derefStr(top.doc.DocumentType),
 		DocInvoiceNum: derefStr(top.doc.WfInvoiceNumber),
 		DocScanPageID: derefStr(top.doc.WfScanPageID),
+		TopN:          topN,
 	}
 	return p, considered, nil
 }
 
-// writeLogEntry formats a proposal block per the spec.
+// writeLogEntry renders one transaction's proposal as a human-review
+// block: header line, status line, and up to three candidate blocks
+// (selected top + runner-up + third) each with its own score breakdown.
+// UNMATCHED with zero candidates stays a one-liner.
 func writeLogEntry(w *os.File, p *MatchProposal) {
 	drcr := "DR"
 	if p.TxnAmount < 0 {
@@ -305,50 +362,89 @@ func writeLogEntry(w *os.File, p *MatchProposal) {
 	fmt.Fprintf(w, "=== TXN %s | $%.2f %s | %s | %s ===\n",
 		p.TxnDate.Format("2006-01-02"), math.Abs(p.TxnAmount), drcr, p.TxnAccount, p.TxnVendor)
 
+	// Status line.
 	switch p.Status {
 	case StatusMatched:
-		fmt.Fprintf(w, "  [MATCHED, score=%d, amount=%s]\n", p.Score, p.AmountMode)
-		writeDocBlock(w, p)
+		fmt.Fprintf(w, "  [MATCHED, top_score=%d, runner_up=%s]\n", p.Score, runnerUpLabel(p.RunnerUpScore))
 	case StatusSuspect:
 		tag := "SUSPECT"
 		if p.SurchargeFlag {
 			tag = "SUSPECT (surcharge)"
 		}
-		fmt.Fprintf(w, "  [%s, score=%d, amount=%s]\n", tag, p.Score, p.AmountMode)
-		writeDocBlock(w, p)
+		fmt.Fprintf(w, "  [%s, top_score=%d, runner_up=%s]\n", tag, p.Score, runnerUpLabel(p.RunnerUpScore))
 	case StatusAmbiguous:
-		fmt.Fprintf(w, "  [AMBIGUOUS, score=%d (runner-up=%d), amount=%s]\n",
-			p.Score, derefInt(p.RunnerUpScore), p.AmountMode)
-		writeDocBlock(w, p)
+		fmt.Fprintf(w, "  [AMBIGUOUS, top_score=%d, runner_up=%s]\n", p.Score, runnerUpLabel(p.RunnerUpScore))
 	case StatusUnmatched:
-		fmt.Fprintln(w, "  [UNMATCHED — no qualifying candidates within 7 days]")
+		if len(p.TopN) == 0 {
+			fmt.Fprintln(w, "  [UNMATCHED — no qualifying candidates within 7 days]")
+			fmt.Fprintln(w)
+			return
+		}
+		fmt.Fprintf(w, "  [UNMATCHED — best candidate scored %d, needs 100]\n", p.Score)
 	}
 
-	if p.RunnerUpScore != nil && p.Status != StatusAmbiguous && p.Status != StatusUnmatched {
-		fmt.Fprintf(w, "  [runner-up score=%d]\n", *p.RunnerUpScore)
+	labels := []string{"Top candidate (selected):", "Runner-up:", "Third:"}
+	if p.Status == StatusUnmatched {
+		labels[0] = "Near-miss (rejected):"
+	}
+	for i, c := range p.TopN {
+		if i >= len(labels) {
+			break
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  %s\n", labels[i])
+		writeCandidate(w, c)
+	}
+	if p.AliasMatchedID != nil {
+		fmt.Fprintf(w, "      alias_matched_id: %d\n", *p.AliasMatchedID)
 	}
 	fmt.Fprintln(w)
 }
 
-func writeDocBlock(w *os.File, p *MatchProposal) {
-	fmt.Fprintf(w, "    → Doc #%d | %s | $%.2f | %s | %s\n",
-		p.DocumentID, p.DocDate.Format("2006-01-02"),
-		p.DocAmount, p.DocType, p.DocVendor)
-	if p.DocScanPageID != "" {
-		fmt.Fprintf(w, "      scan_page_id: %s\n", p.DocScanPageID)
+func runnerUpLabel(rs *int) string {
+	if rs == nil {
+		return "(none)"
 	}
-	if p.DocInvoiceNum != "" {
-		fmt.Fprintf(w, "      invoice_num:  %s\n", p.DocInvoiceNum)
+	return fmt.Sprintf("%d", *rs)
+}
+
+func writeCandidate(w *os.File, c CandidateView) {
+	docVendor := c.DocVendor
+	if docVendor == "" {
+		docVendor = "(no vendor)"
 	}
-	if p.SurchargeFlag && p.SurchargePct != nil && p.ActualInvoiceAmount != nil {
+	fmt.Fprintf(w, "    Doc #%d | %s | $%.2f | %s | %s\n",
+		c.DocumentID, c.DocDate.Format("2006-01-02"),
+		c.DocAmount, c.DocType, docVendor)
+	if c.DocScanPageID != "" || c.DocInvoiceNum != "" {
+		ids := ""
+		if c.DocScanPageID != "" {
+			ids = fmt.Sprintf("scan_page_id: %s", c.DocScanPageID)
+		}
+		if c.DocInvoiceNum != "" {
+			if ids != "" {
+				ids += "   "
+			}
+			ids += fmt.Sprintf("invoice_num: %s", c.DocInvoiceNum)
+		}
+		fmt.Fprintf(w, "      %s\n", ids)
+	}
+	fmt.Fprintf(w, "      amount_mode=%s  scores: amount=%d vendor=%d date=%d  sim=%.0f%%\n",
+		orDash(c.AmountMode), c.AmountScoreComponent, c.VendorScoreComponent, c.DateScoreComponent, c.VendorSimilarityPct)
+	if c.SurchargeFlag && c.SurchargePct != nil && c.ActualInvoiceAmount != nil {
 		fmt.Fprintf(w, "      surcharge_pct: %.2f%%  actual_invoice_amount: $%.2f\n",
-			*p.SurchargePct, *p.ActualInvoiceAmount)
+			*c.SurchargePct, *c.ActualInvoiceAmount)
 	}
-	fmt.Fprintf(w, "      scores: amount=%d vendor=%d date=%d sim=%.0f%%\n",
-		p.AmountScoreComponent, p.VendorScoreComponent, p.DateScoreComponent, p.VendorSimilarityPct)
-	if p.AliasMatchedID != nil {
-		fmt.Fprintf(w, "      alias_matched_id: %d\n", *p.AliasMatchedID)
+	if c.VendorScoreComponent == 0 {
+		fmt.Fprintln(w, "      — no vendor match")
 	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // ── tiny helpers ────────────────────────────────────────────────
