@@ -342,6 +342,10 @@ func Register(r *gin.Engine, gormDB *gorm.DB, secretKey string, cfg *config.Conf
 			admin.GET("/mongo/sync/status", mongoAdminHandler.SyncStatus)
 			admin.GET("/mongo/sync/schedule", mongoAdminHandler.SyncScheduleStatus)
 			admin.POST("/mongo/sync/schedule/trigger", mongoAdminHandler.TriggerSchedule)
+
+			matcherAdminHandler := handlers.NewMatcherAdminHandler(gormDB)
+			admin.POST("/matcher/preview", matcherAdminHandler.StartPreview)
+			admin.GET("/matcher/preview/status", matcherAdminHandler.PreviewStatus)
 			admin.POST("/migrate-plaid-transactions", transactionHandler.MigratePlaidTransactions)
 			admin.POST("/run-matching", matchingEngineHandler.RunMatching)
 			admin.GET("/match-stats", matchingEngineHandler.MatchStats)
